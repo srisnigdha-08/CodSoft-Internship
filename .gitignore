@@ -1,0 +1,35 @@
+# Dependencies and generated outputs
+node_modules/
+dist/
+dist-ssr/
+coverage/
+.vite/
+.cache/
+
+# Local secrets and credentials
+.env
+.env.*
+!.env.example
+.envrc
+.pgpass
+
+# Logs and database backups
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+*.dump
+*.backup
+*.sql.gz
+
+# Existing Task 1 distribution archive (kept outside version control)
+Task1-Student-Management.zip
+CODSOFT_TASKSNO-Task1-pre-migration-*.zip
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+# TypeScript incremental build metadata
+*.tsbuildinfo
