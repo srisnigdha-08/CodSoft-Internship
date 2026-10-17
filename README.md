@@ -7,12 +7,12 @@ This repository organizes the projects completed for the CodSoft Full Stack Web 
 | Task | Project | Status | Technology |
 | --- | --- | --- | --- |
 | 1 | [Student Management System](Task1-Student-Management/README.md) | Implemented; local verification documented in its README | React, TypeScript, Vite, Node.js, Express, PostgreSQL |
-| 2 | Restaurant Ordering System | Planned; implementation not started | Not selected yet |
+| 2 | [Restaurant Ordering Platform (DineDesk)](Task2-Restaurant-Ordering/README.md) | Implemented; local verification documented in its README | React, TypeScript, Vite, Tailwind CSS, Node.js, Express, PostgreSQL, Prisma |
 | 3 | Job Portal | Planned; implementation not started | Not selected yet |
 | 4 | Multi-Vendor Marketplace | Planned; implementation not started | Not selected yet |
 | 5 | Logistics and Fleet Management | Planned; implementation not started | Not selected yet |
 
-Only Task 1 currently contains an implemented application. The other task folders contain planning notes only; this README does not claim those applications are complete.
+Task 1 and Task 2 contain fully implemented full-stack applications. The remaining task folders contain planning notes only.
 
 ## Repository structure
 

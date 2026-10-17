@@ -25,6 +25,7 @@ pnpm-debug.log*
 # Existing Task 1 distribution archive (kept outside version control)
 Task1-Student-Management.zip
 CODSOFT_TASKSNO-Task1-pre-migration-*.zip
+Task2-DineDesk/
 
 # Editor and OS files
 .vscode/

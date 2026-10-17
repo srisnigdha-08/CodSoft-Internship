@@ -1,0 +1,17 @@
+{
+  "name": "dinedesk-restaurant-platform",
+  "version": "1.0.0",
+  "description": "DineDesk — Restaurant Ordering and Table Management Platform (CodSoft Task 2)",
+  "scripts": {
+    "install:all": "npm --prefix server install && npm --prefix client install",
+    "db:generate": "npm --prefix server run prisma:generate",
+    "db:push": "npm --prefix server run prisma:push",
+    "db:seed": "npm --prefix server run prisma:seed",
+    "dev:server": "npm --prefix server run dev",
+    "dev:client": "npm --prefix client run dev",
+    "test": "npm --prefix server run test",
+    "build": "npm --prefix client run build"
+  },
+  "author": "CodSoft Full Stack Web Development Intern",
+  "license": "MIT"
+}
