@@ -102,17 +102,35 @@ Task2-Restaurant-Ordering/
 │   ├── tsconfig.json
 │   └── .env.example
 │
-├── docs/                       # Technical Specifications
-│   ├── ARCHITECTURE.md         # Full architecture design
+├── docs/                       # Technical Specifications & Guides
+│   ├── ARCHITECTURE.md         # Full architecture design & workflows
 │   ├── API_SPECIFICATION.md    # REST endpoints documentation
 │   ├── DATABASE_SCHEMA.md      # Data dictionary & ER diagram
-│   └── TESTING_REPORT.md       # 100% test pass verification
+│   ├── TESTING_REPORT.md       # 100% test pass verification (21/21)
+│   ├── DEMO_VIDEO_OUTLINE.md   # Step-by-step video presentation script
+│   ├── LEARNING_GUIDE.md       # Full engineering guide & technical decisions
+│   └── screenshots/            # Submission screenshot checklist
+│       └── README.md
 │
 ├── package.json                # Root task orchestration scripts
 ├── .gitignore                  # Git exclusions
 ├── .env.example                # Safe environment variable template
 └── README.md                   # Comprehensive guide
 ```
+
+---
+
+## Technical Documentation Suite
+
+Comprehensive engineering documentation is provided in the [`docs/`](docs/) directory:
+
+- 📐 [**Architecture Blueprint**](docs/ARCHITECTURE.md): Multi-tier design, component hierarchy, state flow, and security boundaries.
+- 🔌 [**API Specification**](docs/API_SPECIFICATION.md): Complete REST endpoint contracts, authentication formats, request/response payloads, and error codes.
+- 🗄️ [**Database Schema & Data Dictionary**](docs/DATABASE_SCHEMA.md): Relational models, constraints, enums, indexes, and ER diagram.
+- 🧪 [**Testing & QA Report**](docs/TESTING_REPORT.md): Automated Vitest integration test results, coverage matrix, and boundary test validation.
+- 🎬 [**Demo Video Outline**](docs/DEMO_VIDEO_OUTLINE.md): Timed 3-5 minute presentation script for internship evaluation.
+- 📚 [**Learning Guide**](docs/LEARNING_GUIDE.md): Deep-dive tutorial explaining core architectural concepts, concurrency control, and zero-trust pricing.
+- 📸 [**Screenshots Guide**](docs/screenshots/README.md): Catalog of application interface screens and capture guidelines.
 
 ---
 
