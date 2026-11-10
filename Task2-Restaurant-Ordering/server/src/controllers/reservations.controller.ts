@@ -1,35 +1,65 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import prisma from '../prisma';
-import { ReservationStatus, Role } from '@prisma/client';
-import { BadRequestError, NotFoundError, ConflictError } from '../utils/errors';
+import { Prisma, ReservationStatus } from '@prisma/client';
+import { BadRequestError, ForbiddenError, NotFoundError, ConflictError } from '../utils/errors';
 import { sendCreated, sendSuccess } from '../utils/response';
+import { isRealCalendarDate } from '../utils/date';
+
+const dateField = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be formatted as YYYY-MM-DD')
+  .refine(isRealCalendarDate, 'Date is not a valid calendar date');
+const timeField = z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/, 'Time must be formatted as HH:mm (e.g. 19:30)');
+
+// Enforced by the partial unique index reservations_active_table_slot_key
+function isSlotConflict(err: unknown) {
+  return (
+    err instanceof Prisma.PrismaClientKnownRequestError &&
+    err.code === 'P2002' &&
+    /reservationDate|reservations_active_table_slot/.test(JSON.stringify(err.meta))
+  );
+}
+
+const SLOT_TAKEN_MESSAGE = 'The selected table is already reserved for this date and time slot.';
+
+const validReservationTransitions: Record<ReservationStatus, ReservationStatus[]> = {
+  [ReservationStatus.PENDING]: [ReservationStatus.CONFIRMED, ReservationStatus.CANCELLED],
+  [ReservationStatus.CONFIRMED]: [ReservationStatus.COMPLETED, ReservationStatus.CANCELLED],
+  [ReservationStatus.COMPLETED]: [],
+  [ReservationStatus.CANCELLED]: [],
+};
 
 const createReservationSchema = z.object({
-  customerName: z.string().min(2, 'Name is required'),
+  customerName: z.string().trim().min(2, 'Name is required').max(100),
   customerEmail: z.string().email('Valid email is required').toLowerCase(),
-  customerPhone: z.string().min(7, 'Phone number is required'),
+  customerPhone: z.string().trim().regex(/^[+\d][\d\s()-]{6,19}$/, 'A valid phone number is required'),
   guestCount: z.number().int().min(1, 'Guest count must be at least 1').max(20, 'For groups larger than 20, please contact events directly'),
-  reservationDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be formatted as YYYY-MM-DD'),
-  reservationTime: z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/, 'Time must be formatted as HH:mm (e.g. 19:30)'),
+  reservationDate: dateField,
+  reservationTime: timeField,
   tableId: z.string().uuid().optional().nullable(),
-  specialRequests: z.string().optional().nullable(),
+  specialRequests: z.string().max(500).optional().nullable(),
+});
+
+const availabilityQuerySchema = z.object({
+  date: dateField,
+  time: timeField,
+  guestCount: z.coerce.number().int().min(1).max(20).default(2),
+});
+
+const reservationListQuerySchema = z.object({
+  date: dateField.optional(),
+  status: z.nativeEnum(ReservationStatus).optional(),
 });
 
 const updateReservationStatusSchema = z.object({
   status: z.nativeEnum(ReservationStatus),
-  specialRequests: z.string().optional(),
+  specialRequests: z.string().max(500).optional(),
 });
 
 export async function checkAvailability(req: Request, res: Response, next: NextFunction) {
   try {
-    const { date, time, guestCount } = req.query;
-
-    if (!date || !time) {
-      throw new BadRequestError('Date and time query parameters are required.');
-    }
-
-    const guests = guestCount ? parseInt(String(guestCount), 10) : 2;
+    const { date, time, guestCount: guests } = availabilityQuerySchema.parse(req.query);
 
     // Get all active tables with capacity >= guests
     const tables = await prisma.restaurantTable.findMany({
@@ -40,11 +70,11 @@ export async function checkAvailability(req: Request, res: Response, next: NextF
       orderBy: { capacity: 'asc' },
     });
 
-    // Check existing reservations for this date and time window (+- 2 hours)
+    // A table is unavailable only for the exact same date and time slot (no duration overlap check)
     const bookedReservations = await prisma.reservation.findMany({
       where: {
-        reservationDate: String(date),
-        reservationTime: String(time),
+        reservationDate: date,
+        reservationTime: time,
         status: { in: [ReservationStatus.PENDING, ReservationStatus.CONFIRMED] },
         tableId: { not: null },
       },
@@ -72,16 +102,15 @@ export async function createReservation(req: Request, res: Response, next: NextF
   try {
     const validated = createReservationSchema.parse(req.body);
 
-    // Validate that the reservation date is not in the past
-    const today = new Date().toISOString().split('T')[0];
-    if (validated.reservationDate < today) {
-      throw new BadRequestError('Cannot book reservations for past dates.');
+    // Compared in the server's local time zone (the restaurant's time zone)
+    if (new Date(`${validated.reservationDate}T${validated.reservationTime}:00`) < new Date()) {
+      throw new BadRequestError('Reservations must be for a future date and time.');
     }
 
     const customerId = req.user?.userId || null;
     const reservationNumber = `RES-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
 
-    // Concurrency controlled table allocation using database transaction
+    // Row locks serialize competing requests; the partial unique index is the final database-level guard
     const reservation = await prisma.$transaction(async (tx) => {
       let allocatedTableId = validated.tableId;
 
@@ -113,7 +142,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
         });
 
         if (conflict) {
-          throw new ConflictError('The selected table is already reserved for this date and time slot.');
+          throw new ConflictError(SLOT_TAKEN_MESSAGE);
         }
       } else {
         // Auto-allocate best fitting table
@@ -131,7 +160,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
 
         // Acquire row-level lock on candidate tables to serialize concurrent allocations
         const candidateIds = eligibleTables.map((t) => t.id);
-        await tx.$queryRaw`SELECT id FROM "restaurant_tables" WHERE id = ANY(${candidateIds}) FOR UPDATE`;
+        await tx.$queryRaw`SELECT id FROM "restaurant_tables" WHERE id = ANY(${candidateIds}) ORDER BY id FOR UPDATE`;
 
         const booked = await tx.reservation.findMany({
           where: {
@@ -177,27 +206,14 @@ export async function createReservation(req: Request, res: Response, next: NextF
 
     return sendCreated(res, { reservation }, 'Table reservation confirmed successfully');
   } catch (err) {
-    next(err);
+    next(isSlotConflict(err) ? new ConflictError(SLOT_TAKEN_MESSAGE) : err);
   }
 }
 
 export async function getMyReservations(req: Request, res: Response, next: NextFunction) {
   try {
-    const customerId = req.user?.userId;
-    const email = req.query.email as string | undefined;
-
-    const where: any = {};
-    if (customerId) {
-      where.OR = [{ customerId }, { customerEmail: req.user?.email }];
-    } else if (email) {
-      where.customerEmail = email.toLowerCase();
-      where.customerId = null; // Prevent enumeration of registered users' reservations
-    } else {
-      throw new BadRequestError('Authentication or email is required to view your reservations.');
-    }
-
     const reservations = await prisma.reservation.findMany({
-      where,
+      where: { customerId: req.user!.userId },
       orderBy: [{ reservationDate: 'desc' }, { reservationTime: 'desc' }],
       include: {
         table: true,
@@ -212,14 +228,14 @@ export async function getMyReservations(req: Request, res: Response, next: NextF
 
 export async function getAllReservations(req: Request, res: Response, next: NextFunction) {
   try {
-    const { date, status } = req.query;
+    const { date, status } = reservationListQuerySchema.parse(req.query);
 
     const where: any = {};
     if (date) {
-      where.reservationDate = String(date);
+      where.reservationDate = date;
     }
     if (status) {
-      where.status = status as ReservationStatus;
+      where.status = status;
     }
 
     const reservations = await prisma.reservation.findMany({
@@ -252,6 +268,13 @@ export async function updateReservationStatus(req: Request, res: Response, next:
       throw new NotFoundError('Reservation not found');
     }
 
+    if (
+      validated.status !== reservation.status &&
+      !validReservationTransitions[reservation.status].includes(validated.status)
+    ) {
+      throw new BadRequestError(`Invalid status transition: Cannot move reservation from "${reservation.status}" to "${validated.status}".`);
+    }
+
     const updated = await prisma.reservation.update({
       where: { id: reservation.id },
       data: {
@@ -262,6 +285,38 @@ export async function updateReservationStatus(req: Request, res: Response, next:
     });
 
     return sendSuccess(res, { reservation: updated }, `Reservation status updated to ${validated.status}`);
+  } catch (err) {
+    next(isSlotConflict(err) ? new ConflictError(SLOT_TAKEN_MESSAGE) : err);
+  }
+}
+
+export async function cancelMyReservation(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { id } = req.params;
+
+    const reservation = await prisma.reservation.findFirst({
+      where: { OR: [{ id }, { reservationNumber: id }] },
+    });
+
+    if (!reservation) {
+      throw new NotFoundError('Reservation not found');
+    }
+
+    if (reservation.customerId !== req.user!.userId) {
+      throw new ForbiddenError('You can only cancel your own reservations.');
+    }
+
+    if (!validReservationTransitions[reservation.status].includes(ReservationStatus.CANCELLED)) {
+      throw new BadRequestError(`Cannot cancel a reservation in "${reservation.status}" status.`);
+    }
+
+    const updated = await prisma.reservation.update({
+      where: { id: reservation.id },
+      data: { status: ReservationStatus.CANCELLED },
+      include: { table: true },
+    });
+
+    return sendSuccess(res, { reservation: updated }, 'Reservation cancelled successfully');
   } catch (err) {
     next(err);
   }

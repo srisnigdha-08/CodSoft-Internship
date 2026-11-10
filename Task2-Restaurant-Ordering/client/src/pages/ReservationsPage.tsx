@@ -27,7 +27,9 @@ const timeSlots = [
 export const ReservationsPage: React.FC<ReservationsPageProps> = ({ onNavigate }) => {
   const { user } = useAuth();
 
-  const todayStr = new Date().toISOString().split('T')[0];
+  // Local date, so the minimum is correct around midnight in time zones ahead of UTC
+  const now = new Date();
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
   const [date, setDate] = useState<string>(todayStr);
   const [time, setTime] = useState<string>('19:30');
@@ -35,7 +37,7 @@ export const ReservationsPage: React.FC<ReservationsPageProps> = ({ onNavigate }
   const [tableId, setTableId] = useState<string>('');
   const [customerName, setCustomerName] = useState(user?.name || '');
   const [customerEmail, setCustomerEmail] = useState(user?.email || '');
-  const [customerPhone, setCustomerPhone] = useState(user?.phone || '+91 98765 43212');
+  const [customerPhone, setCustomerPhone] = useState(user?.phone || '');
   const [specialRequests, setSpecialRequests] = useState('');
 
   const [checkingAvailability, setCheckingAvailability] = useState(false);
@@ -120,13 +122,13 @@ export const ReservationsPage: React.FC<ReservationsPageProps> = ({ onNavigate }
       <div className="text-center max-w-2xl mx-auto space-y-3">
         <span className="px-3 py-1 rounded-full bg-terracotta-100 text-terracotta-800 text-xs font-bold uppercase tracking-wider inline-flex items-center space-x-1.5">
           <CalendarDays className="w-3.5 h-3.5 text-terracotta-600" />
-          <span>Real-Time Table Reservations</span>
+          <span>Table Reservations</span>
         </span>
         <h1 className="font-display text-4xl sm:text-5xl font-bold text-charcoal-900">
           Reserve Your Dining Experience
         </h1>
         <p className="text-sm text-stone-600 leading-relaxed">
-          Select your desired date, dining time, and guest count. Our concurrency-controlled booking engine reserves your table instantly in PostgreSQL.
+          Select your desired date, dining time, and guest count. Your table is held as soon as the booking is confirmed.
         </p>
       </div>
 
@@ -256,7 +258,7 @@ export const ReservationsPage: React.FC<ReservationsPageProps> = ({ onNavigate }
                 {checkingAvailability && (
                   <span className="text-[11px] text-terracotta-700 flex items-center space-x-1">
                     <Loader2 className="w-3 h-3 animate-spin" />
-                    <span>Checking live availability...</span>
+                    <span>Checking availability...</span>
                   </span>
                 )}
               </div>

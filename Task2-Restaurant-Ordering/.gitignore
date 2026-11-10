@@ -25,3 +25,19 @@ npm-debug.log*
 .cache/
 prisma/*.db
 prisma/*.db-journal
+
+# Local database dumps
+*.dump
+*.bak
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp

@@ -23,14 +23,13 @@ Creates a new customer account.
     "success": true,
     "message": "Registration successful",
     "data": {
-      "user": { "id": "uuid", "name": "Priya Sharma", "email": "priya@example.com", "role": "CUSTOMER" },
-      "token": "jwt_token_string"
+      "user": { "id": "uuid", "name": "Priya Sharma", "email": "priya@example.com", "role": "CUSTOMER" }
     }
   }
   ```
 
 ### `POST /auth/login`
-Authenticates user and returns JWT token and session cookie.
+Authenticates the user and sets the JWT in the `dinedesk_token` HttpOnly cookie. The token is not included in the JSON body.
 - **Request Body:**
   ```json
   {
@@ -44,15 +43,14 @@ Authenticates user and returns JWT token and session cookie.
     "success": true,
     "message": "Login successful",
     "data": {
-      "user": { "id": "uuid", "name": "Priya Sharma", "email": "customer@dinedesk.local", "role": "CUSTOMER" },
-      "token": "jwt_token_string"
+      "user": { "id": "uuid", "name": "Priya Sharma", "email": "customer@dinedesk.local", "role": "CUSTOMER" }
     }
   }
   ```
 
 ### `GET /auth/me`
 Retrieves currently authenticated user profile.
-- **Headers:** `Authorization: Bearer <token>`
+- **Authentication:** `dinedesk_token` cookie, or `Authorization: Bearer <token>` for API tools.
 - **Response (200 OK):** User object.
 
 ### `POST /auth/logout`
@@ -63,7 +61,10 @@ Clears session cookie and logs out user.
 ## 2. Menu & Category Endpoints
 
 ### `GET /categories`
-Lists all active menu categories with total item counts.
+Lists all menu categories with total item counts.
+
+### `POST /categories`, `PATCH /categories/:id`, `DELETE /categories/:id` (Admin Only)
+Manage categories. Deleting a category also deletes its menu items.
 
 ### `GET /menu`
 Retrieves menu items with optional filtering.
@@ -91,7 +92,7 @@ Deletes a menu item from the catalog.
 ## 3. Order Endpoints
 
 ### `POST /orders`
-Creates a new customer order with server-side price recalculation.
+Creates a new order with server-side price recalculation. Quantity must be 1 to 50 per line. `deliveryAddress` is required for `DELIVERY`. Optional `simulatePaymentFailure: true` records a simulated decline for an online payment.
 - **Request Body:**
   ```json
   {
@@ -110,13 +111,13 @@ Creates a new customer order with server-side price recalculation.
 - **Response (201 Created):** Full order object including recalculated subtotal, tax, delivery fee, grand total, items, and payment transaction.
 
 ### `GET /orders/my`
-Retrieves the logged-in customer's order history.
+Retrieves the logged-in customer's order history. Requires authentication.
 
 ### `GET /orders/:id`
-Retrieves order details, items, table, and progress timeline. Enforces ownership check for customers.
+Retrieves order details, items, table, and progress timeline. Account orders are limited to their owner and staff. Guest orders are reachable only by UUID, not by order number.
 
 ### `PATCH /orders/:id/cancel`
-Cancels an order if it is still in `PENDING` or `CONFIRMED` state.
+Cancels an order if it is still in `PENDING` or `CONFIRMED` state, using the same access rule. A successful simulated payment becomes `REFUNDED`.
 
 ---
 
@@ -128,7 +129,8 @@ Retrieves active incoming orders for the kitchen display system (FIFO order).
 ### `PATCH /kitchen/orders/:id/status` (Kitchen Staff & Admin Only)
 Advances order through validated status machine:
 - Permitted transitions: `PENDING` -> `CONFIRMED` -> `PREPARING` -> `READY` -> `COMPLETED`.
-- Invalid transitions return `400 Bad Request`.
+- `CANCELLED` is also allowed from any active status.
+- Invalid transitions return `400 Bad Request`. A concurrent update returns `409 Conflict`.
 
 ---
 
@@ -150,34 +152,37 @@ Checks table availability for a specified date, time, and guest count.
   ```
 
 ### `POST /reservations`
-Books a table with transaction-level double-booking prevention.
+Books a table for a future date and time. Row locks and a partial unique index reject a second active booking of the same table, date and time with `409 Conflict`.
 
 ### `GET /reservations/my`
-Customer's reservation list.
+The signed-in customer's reservation list. Requires authentication.
+
+### `PATCH /reservations/:id/cancel`
+Cancels the signed-in customer's own `PENDING` or `CONFIRMED` reservation.
 
 ### `GET /reservations` (Staff & Admin Only)
 Master reservation list.
 
 ### `PATCH /reservations/:id/status` (Staff & Admin Only)
-Updates booking status (`CONFIRMED`, `COMPLETED`, `CANCELLED`).
+Updates booking status. Allowed: `PENDING` → `CONFIRMED` or `CANCELLED`, and `CONFIRMED` → `COMPLETED` or `CANCELLED`.
 
 ---
 
 ## 6. Payments Endpoints
 
 ### `POST /payments/checkout`
-Verifies order amount and processes payment via development mock adapter.
-- Supports `simulateFailure: true` parameter for QA testing failure paths.
+Simulates a payment for an order. No gateway is connected. Account orders are limited to their owner and staff, and `CASH` is rejected.
+- `simulateFailure: true` records a declined payment and returns `402`.
 
 ### `GET /payments/:id`
-Retrieves payment receipt and gateway response audit.
+Retrieves a simulated payment record, using the same access rule as orders.
 
 ---
 
 ## 7. Admin Endpoints
 
 ### `GET /admin/stats` (Admin Only)
-Provides real-time metrics: revenue, active orders, today's bookings, popular items.
+Provides metrics: revenue, active orders, today's bookings, popular items.
 
 ### `GET /admin/orders` (Admin Only)
 Paginated master order list with search filters.
@@ -186,4 +191,14 @@ Paginated master order list with search filters.
 List users and their roles.
 
 ### `PATCH /admin/users/:id/role` (Admin Only)
-Promotes/updates a user's role (`CUSTOMER`, `KITCHEN_STAFF`, `ADMIN`).
+Updates another user's role (`CUSTOMER`, `KITCHEN_STAFF`, `ADMIN`). Administrators cannot change their own role. The change applies at that user's next login.
+
+---
+
+## 8. Table Endpoints
+
+### `GET /tables`
+Lists restaurant tables.
+
+### `POST /tables`, `PATCH /tables/:id`, `DELETE /tables/:id` (Admin Only)
+Manage tables. Deletion is refused while the table has active orders or upcoming reservations.

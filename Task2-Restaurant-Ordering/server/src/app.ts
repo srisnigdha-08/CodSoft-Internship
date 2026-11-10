@@ -18,15 +18,6 @@ import adminRoutes from './routes/admin.routes';
 
 export const app = express();
 
-// Secure CORS whitelist
-const allowedOrigins = new Set<string>([
-  config.frontendOrigin,
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-]);
-
 // Middlewares
 app.use(
   cors({
@@ -35,7 +26,8 @@ app.use(
       if (!origin) {
         return callback(null, true);
       }
-      if (allowedOrigins.has(origin)) {
+      // Only the single configured frontend origin may make credentialed browser requests
+      if (origin === config.frontendOrigin) {
         return callback(null, true);
       }
       return callback(new ForbiddenError(`Origin '${origin}' not allowed by CORS policy.`));
@@ -69,6 +61,11 @@ app.use('/api/v1/reservations', reservationsRoutes);
 app.use('/api/v1/tables', tablesRoutes);
 app.use('/api/v1/payments', paymentsRoutes);
 app.use('/api/v1/admin', adminRoutes);
+
+// Unknown API routes return JSON, matching every other API response
+app.use('/api', (req, res) => {
+  res.status(404).json({ success: false, message: 'API endpoint not found.' });
+});
 
 // Centralized error handler
 app.use(errorHandler);

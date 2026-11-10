@@ -20,11 +20,14 @@ const createMenuItemSchema = z.object({
   name: z.string().min(2, 'Name must be at least 2 characters'),
   slug: z.string().min(2, 'Slug is required'),
   description: z.string().min(5, 'Description must be at least 5 characters'),
-  price: z.number().positive('Price must be greater than zero'),
-  imageUrl: z.string().url('Invalid image URL'),
+  price: z.number().positive('Price must be greater than zero').max(100000, 'Price is too high'),
+  // An absolute URL, or a path to an image shipped with the frontend (e.g. /images/dish.svg)
+  imageUrl: z
+    .string()
+    .refine((value) => z.string().url().safeParse(value).success || /^\/(?!\/)[\w./-]+$/.test(value), 'Invalid image URL'),
   isVegetarian: z.boolean().default(false),
   isAvailable: z.boolean().default(true),
-  preparationTimeMinutes: z.number().int().min(1).default(15),
+  preparationTimeMinutes: z.number().int().min(1).max(480).default(15),
   sortOrder: z.number().int().default(0),
 });
 

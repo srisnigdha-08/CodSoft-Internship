@@ -80,22 +80,24 @@ model MenuCategory {
 }
 
 model MenuItem {
-  id                     String        @id @default(uuid())
+  id                     String       @id @default(uuid())
   categoryId             String
   name                   String
-  slug                   String        @unique
+  slug                   String       @unique
   description            String
-  price                  Decimal       @db.Decimal(10, 2)
+  price                  Decimal      @db.Decimal(10, 2)
   imageUrl               String
-  isVegetarian           Boolean       @default(false)
-  isAvailable            Boolean       @default(true)
-  preparationTimeMinutes Int           @default(15)
-  sortOrder              Int           @default(0)
-  createdAt              DateTime      @default(now())
-  updatedAt              DateTime      @updatedAt
-  category               MenuCategory  @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  isVegetarian           Boolean      @default(false)
+  isAvailable            Boolean      @default(true)
+  preparationTimeMinutes Int          @default(15)
+  sortOrder              Int          @default(0)
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+  category               MenuCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   orderItems             OrderItem[]
 
+  @@index([categoryId])
+  @@index([isAvailable])
   @@map("menu_items")
 }
 
@@ -137,6 +139,9 @@ model Order {
   payment         Payment?
   statusHistory   OrderStatusHistory[]
 
+  @@index([customerId])
+  @@index([tableId])
+  @@index([status, createdAt])
   @@map("orders")
 }
 
@@ -153,6 +158,8 @@ model OrderItem {
   order      Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
   menuItem   MenuItem? @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
 
+  @@index([orderId])
+  @@index([menuItemId])
   @@map("order_items")
 }
 
@@ -174,6 +181,10 @@ model Reservation {
   customer          User?             @relation(fields: [customerId], references: [id], onDelete: SetNull)
   table             RestaurantTable?  @relation(fields: [tableId], references: [id], onDelete: SetNull)
 
+  @@index([customerId])
+  @@index([tableId, reservationDate, reservationTime])
+  @@index([reservationDate, reservationTime])
+  @@index([status])
   @@map("reservations")
 }
 
@@ -204,5 +215,6 @@ model OrderStatusHistory {
   order           Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
   changedBy       User?        @relation(fields: [changedByUserId], references: [id], onDelete: SetNull)
 
+  @@index([orderId, createdAt])
   @@map("order_status_history")
 }

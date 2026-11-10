@@ -1,26 +1,34 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import prisma from '../prisma';
-import { OrderStatus, OrderType, PaymentMethod, PaymentStatus, Role } from '@prisma/client';
-import { BadRequestError, NotFoundError, ForbiddenError, UnauthorizedError } from '../utils/errors';
+import { OrderStatus, OrderType, PaymentMethod, PaymentStatus } from '@prisma/client';
+import { BadRequestError, ConflictError, NotFoundError } from '../utils/errors';
 import { sendCreated, sendSuccess } from '../utils/response';
+import { assertRecordAccess } from '../utils/access';
+
+const MAX_ITEM_QUANTITY = 50;
 
 const createOrderSchema = z.object({
-  customerName: z.string().min(2, 'Name is required'),
+  customerName: z.string().trim().min(2, 'Name is required').max(100),
   customerEmail: z.string().email('Valid email is required').toLowerCase(),
-  customerPhone: z.string().min(7, 'Valid contact number is required'),
+  customerPhone: z.string().trim().regex(/^[+\d][\d\s()-]{6,19}$/, 'Valid contact number is required'),
   orderType: z.nativeEnum(OrderType),
   tableId: z.string().uuid().optional().nullable(),
-  deliveryAddress: z.string().optional().nullable(),
-  notes: z.string().optional().nullable(),
+  deliveryAddress: z.string().max(500).optional().nullable(),
+  notes: z.string().max(500).optional().nullable(),
   paymentMethod: z.nativeEnum(PaymentMethod).default(PaymentMethod.MOCK_ONLINE),
+  simulatePaymentFailure: z.boolean().optional().default(false),
   items: z.array(
     z.object({
       menuItemId: z.string().uuid('Invalid menu item ID'),
-      quantity: z.number().int().min(1, 'Quantity must be at least 1'),
-      notes: z.string().optional().nullable(),
+      quantity: z.number().int().min(1, 'Quantity must be at least 1').max(MAX_ITEM_QUANTITY, `Quantity cannot exceed ${MAX_ITEM_QUANTITY}`),
+      notes: z.string().max(300).optional().nullable(),
     })
-  ).min(1, 'Order must contain at least one item'),
+  ).min(1, 'Order must contain at least one item').max(50, 'Order contains too many items'),
+});
+
+const cancelOrderSchema = z.object({
+  reason: z.string().trim().min(1).max(300).optional(),
 });
 
 export async function createOrder(req: Request, res: Response, next: NextFunction) {
@@ -41,7 +49,7 @@ export async function createOrder(req: Request, res: Response, next: NextFunctio
     }
 
     // Retrieve and validate all menu items from database
-    const itemIds = validated.items.map((i) => i.menuItemId);
+    const itemIds = [...new Set(validated.items.map((i) => i.menuItemId))];
     const dbMenuItems = await prisma.menuItem.findMany({
       where: { id: { in: itemIds } },
     });
@@ -65,7 +73,7 @@ export async function createOrder(req: Request, res: Response, next: NextFunctio
       const dbItem = menuItemsMap.get(item.menuItemId)!;
       const unitPrice = Number(dbItem.price);
       const lineSubtotal = Number((unitPrice * item.quantity).toFixed(2));
-      subtotalNum += lineSubtotal;
+      subtotalNum = Number((subtotalNum + lineSubtotal).toFixed(2));
 
       return {
         menuItemId: dbItem.id,
@@ -88,7 +96,9 @@ export async function createOrder(req: Request, res: Response, next: NextFunctio
 
     // Database transaction to atomically persist Order, OrderItems, Payment, and Initial Status
     const result = await prisma.$transaction(async (tx) => {
-      const isMockSuccess = validated.paymentMethod !== PaymentMethod.CASH;
+      const isOnlinePayment = validated.paymentMethod !== PaymentMethod.CASH;
+      const isSimulatedFailure = isOnlinePayment && validated.simulatePaymentFailure;
+      const isMockSuccess = isOnlinePayment && !isSimulatedFailure;
 
       const order = await tx.order.create({
         data: {
@@ -98,8 +108,8 @@ export async function createOrder(req: Request, res: Response, next: NextFunctio
           customerEmail: validated.customerEmail,
           customerPhone: validated.customerPhone,
           orderType: validated.orderType,
-          tableId: validated.tableId || null,
-          deliveryAddress: validated.deliveryAddress || null,
+          tableId: validated.orderType === OrderType.DINE_IN ? validated.tableId || null : null,
+          deliveryAddress: validated.orderType === OrderType.DELIVERY ? validated.deliveryAddress!.trim() : null,
           status: isMockSuccess ? OrderStatus.CONFIRMED : OrderStatus.PENDING,
           subtotal: subtotalNum,
           tax: taxNum,
@@ -114,12 +124,20 @@ export async function createOrder(req: Request, res: Response, next: NextFunctio
               paymentNumber,
               amount: totalAmountNum,
               method: validated.paymentMethod,
-              status: isMockSuccess ? PaymentStatus.SUCCESSFUL : PaymentStatus.PENDING,
+              status: isMockSuccess
+                ? PaymentStatus.SUCCESSFUL
+                : isSimulatedFailure
+                ? PaymentStatus.FAILED
+                : PaymentStatus.PENDING,
               transactionRef: isMockSuccess ? `TXN-MOCK-${Math.random().toString(36).substring(2, 10).toUpperCase()}` : null,
               gatewayResponse: JSON.stringify({
                 adapter: 'DineDesk Development Mock Payment Gateway',
                 mockMode: true,
-                message: isMockSuccess ? 'Payment simulated successfully' : 'Payment pending on cash handover',
+                message: isMockSuccess
+                  ? 'Payment simulated successfully'
+                  : isSimulatedFailure
+                  ? 'Payment failure simulated on request'
+                  : 'Payment pending on cash handover',
                 timestamp: new Date().toISOString(),
               }),
             },
@@ -138,7 +156,7 @@ export async function createOrder(req: Request, res: Response, next: NextFunctio
                       previousStatus: OrderStatus.PENDING,
                       newStatus: OrderStatus.CONFIRMED,
                       changedByUserId: customerId,
-                      notes: 'Payment verified and order automatically confirmed',
+                      notes: 'Simulated payment succeeded; order automatically confirmed',
                     },
                   ]
                 : []),
@@ -166,21 +184,8 @@ export async function createOrder(req: Request, res: Response, next: NextFunctio
 
 export async function getMyOrders(req: Request, res: Response, next: NextFunction) {
   try {
-    const customerId = req.user?.userId;
-    const email = req.query.email as string | undefined;
-
-    const where: any = {};
-    if (customerId) {
-      where.OR = [{ customerId }, { customerEmail: req.user?.email }];
-    } else if (email) {
-      where.customerEmail = email.toLowerCase();
-      where.customerId = null; // Prevent enumeration of registered users' account orders
-    } else {
-      throw new BadRequestError('Authentication or email is required to view your orders.');
-    }
-
     const orders = await prisma.order.findMany({
-      where,
+      where: { customerId: req.user!.userId },
       orderBy: { createdAt: 'desc' },
       include: {
         items: true,
@@ -229,15 +234,7 @@ export async function getOrderById(req: Request, res: Response, next: NextFuncti
       throw new NotFoundError('Order not found');
     }
 
-    // Role-based ownership check
-    if (order.customerId) {
-      if (!req.user) {
-        throw new UnauthorizedError('Authentication is required to view this account order.');
-      }
-      if (req.user.role === Role.CUSTOMER && order.customerId !== req.user.userId && order.customerEmail !== req.user.email) {
-        throw new ForbiddenError('You do not have permission to view this order.');
-      }
-    }
+    assertRecordAccess(req.user, order.customerId, id === order.id);
 
     return sendSuccess(res, { order });
   } catch (err) {
@@ -248,7 +245,7 @@ export async function getOrderById(req: Request, res: Response, next: NextFuncti
 export async function cancelOrder(req: Request, res: Response, next: NextFunction) {
   try {
     const { id } = req.params;
-    const reason = req.body.reason || 'Cancelled by customer';
+    const reason = cancelOrderSchema.parse(req.body ?? {}).reason || 'Cancelled by customer';
 
     const order = await prisma.order.findFirst({
       where: { OR: [{ id }, { orderNumber: id }] },
@@ -259,39 +256,30 @@ export async function cancelOrder(req: Request, res: Response, next: NextFunctio
       throw new NotFoundError('Order not found');
     }
 
+    assertRecordAccess(req.user, order.customerId, id === order.id);
+
     // Only allow cancellation in PENDING or CONFIRMED state
     if (order.status !== OrderStatus.PENDING && order.status !== OrderStatus.CONFIRMED) {
       throw new BadRequestError(`Cannot cancel order in "${order.status}" status. Only PENDING or CONFIRMED orders can be cancelled.`);
     }
 
-    // Ownership check for customers
-    if (order.customerId) {
-      if (!req.user) {
-        throw new UnauthorizedError('Authentication is required to cancel this account order.');
-      }
-      if (req.user.role === Role.CUSTOMER && order.customerId !== req.user.userId && order.customerEmail !== req.user.email) {
-        throw new ForbiddenError('You can only cancel your own orders.');
-      }
-    }
-
     const updatedOrder = await prisma.$transaction(async (tx) => {
-      const updated = await tx.order.update({
-        where: { id: order.id },
+      // Conditional update: fails if the kitchen advanced the order after it was read above
+      const { count } = await tx.order.updateMany({
+        where: { id: order.id, status: order.status },
+        data: { status: OrderStatus.CANCELLED },
+      });
+      if (count === 0) {
+        throw new ConflictError('This order was just updated by the kitchen and can no longer be cancelled.');
+      }
+
+      await tx.orderStatusHistory.create({
         data: {
-          status: OrderStatus.CANCELLED,
-          statusHistory: {
-            create: {
-              previousStatus: order.status,
-              newStatus: OrderStatus.CANCELLED,
-              changedByUserId: req.user?.userId || null,
-              notes: reason,
-            },
-          },
-        },
-        include: {
-          items: true,
-          payment: true,
-          statusHistory: true,
+          orderId: order.id,
+          previousStatus: order.status,
+          newStatus: OrderStatus.CANCELLED,
+          changedByUserId: req.user?.userId || null,
+          notes: reason,
         },
       });
 
@@ -301,6 +289,7 @@ export async function cancelOrder(req: Request, res: Response, next: NextFunctio
           data: {
             status: PaymentStatus.REFUNDED,
             gatewayResponse: JSON.stringify({
+              simulated: true,
               refunded: true,
               refundReason: reason,
               timestamp: new Date().toISOString(),
@@ -309,7 +298,10 @@ export async function cancelOrder(req: Request, res: Response, next: NextFunctio
         });
       }
 
-      return updated;
+      return tx.order.findUniqueOrThrow({
+        where: { id: order.id },
+        include: { items: true, payment: true, statusHistory: true },
+      });
     });
 
     return sendSuccess(res, { order: updatedOrder }, 'Order cancelled successfully');

@@ -232,8 +232,8 @@ export const Navbar: React.FC<NavbarProps> = ({ currentPage, onNavigate }) => {
           </div>
         </div>
 
-        {/* Quick Demo Switcher Bar */}
-        <div className="hidden sm:flex items-center justify-between py-1.5 px-3 bg-cream-200/50 rounded-lg text-xs border border-cream-300/40 text-stone-600 mb-2">
+        {/* Quick Demo Switcher Bar (development only) */}
+        {import.meta.env.DEV && <div className="hidden sm:flex items-center justify-between py-1.5 px-3 bg-cream-200/50 rounded-lg text-xs border border-cream-300/40 text-stone-600 mb-2">
           <span className="flex items-center space-x-1 font-medium">
             <Sparkles className="w-3.5 h-3.5 text-amber-600" />
             <span>Fast Role Switcher (One-Click Demo):</span>
@@ -258,7 +258,7 @@ export const Navbar: React.FC<NavbarProps> = ({ currentPage, onNavigate }) => {
               Administrator
             </button>
           </div>
-        </div>
+        </div>}
       </div>
 
       {/* Mobile Drawer */}

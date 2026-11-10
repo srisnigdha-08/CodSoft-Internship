@@ -1,6 +1,6 @@
 # DineDesk — Database Architecture & Entity Relationships
 
-Database Engine: **PostgreSQL 16.4**  
+Database Engine: **PostgreSQL** (verified on 18.6)  
 ORM: **Prisma Client (v5.22.0)**  
 Database Name: `dinedesk_db`
 
@@ -84,7 +84,7 @@ Database Name: `dinedesk_db`
 | `price` | DECIMAL(10,2)| NOT NULL | Exact item selling price |
 | `imageUrl` | TEXT | NOT NULL | High-resolution food photograph |
 | `isVegetarian`| BOOLEAN | DEFAULT false | Pure vegetarian badge flag |
-| `isAvailable` | BOOLEAN | DEFAULT true | Real-time kitchen availability flag |
+| `isAvailable` | BOOLEAN | DEFAULT true | Whether the dish can be ordered |
 | `preparationTimeMinutes` | INT | DEFAULT 15 | Average preparation time |
 
 ### 2.4 `orders`
@@ -142,3 +142,28 @@ Database Name: `dinedesk_db`
 | `status` | ENUM | NOT NULL | `PENDING`, `SUCCESSFUL`, `FAILED`, `REFUNDED` |
 | `transactionRef` | VARCHAR | NULLABLE | Gateway transaction reference |
 | `gatewayResponse` | TEXT | NULLABLE | JSON log of verified mock response |
+
+---
+
+## 3. Migrations and Indexes
+
+The schema is managed with Prisma Migrate in `server/prisma/migrations`:
+
+| Migration | Purpose |
+|---|---|
+| `20261110000000_init` | Baseline: all tables, enums, unique constraints and foreign keys |
+| `20261110000100_add_indexes_and_reservation_slot_guard` | Foreign-key and lookup indexes, plus the double-booking guard |
+| `20261110000200_fix_paneer_tikka_image` | Data fix: replaces one incorrect seeded dish photo, only where that exact photo is still in use |
+| `20261110000300_fix_seeded_dish_images` | Data fix: replaces three mismatched seeded dish photos, only where those exact photos are still in use |
+
+Indexes added: `menu_items(categoryId)`, `menu_items(isAvailable)`, `orders(customerId)`, `orders(tableId)`, `orders(status, createdAt)`, `order_items(orderId)`, `order_items(menuItemId)`, `reservations(customerId)`, `reservations(tableId, reservationDate, reservationTime)`, `reservations(reservationDate, reservationTime)`, `reservations(status)`, `order_status_history(orderId, createdAt)`.
+
+### Double-booking guard
+
+```sql
+CREATE UNIQUE INDEX "reservations_active_table_slot_key"
+  ON "reservations" ("tableId", "reservationDate", "reservationTime")
+  WHERE "status" IN ('PENDING', 'CONFIRMED') AND "tableId" IS NOT NULL;
+```
+
+Prisma schema syntax cannot express partial indexes, so this exists only in migration SQL. Use `prisma migrate deploy`, not `prisma db push`, or the guard will not be created. It compares exact date and time values and has no notion of dining duration.

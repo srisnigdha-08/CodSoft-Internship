@@ -19,6 +19,15 @@ if (!cookieSecret) {
   );
 }
 
+// The placeholders in .env.example are tolerated for local development only.
+if (process.env.NODE_ENV === 'production') {
+  for (const [name, value] of [['JWT_SECRET', jwtSecret], ['COOKIE_SECRET', cookieSecret]]) {
+    if (value.length < 32 || value.startsWith('CHANGE_ME')) {
+      throw new Error(`FATAL CONFIGURATION ERROR: ${name} must be a random value of at least 32 characters in production.`);
+    }
+  }
+}
+
 export const config = {
   port: parseInt(process.env.PORT || '5050', 10),
   nodeEnv: process.env.NODE_ENV || 'development',

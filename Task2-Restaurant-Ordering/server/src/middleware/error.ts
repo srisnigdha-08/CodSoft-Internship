@@ -31,12 +31,29 @@ export function errorHandler(
     });
   }
 
+  // Malformed or oversized request bodies rejected by express.json()
+  if (err?.type === 'entity.parse.failed') {
+    return res.status(400).json({ success: false, message: 'Request body contains invalid JSON.' });
+  }
+  if (err?.type === 'entity.too.large') {
+    return res.status(413).json({ success: false, message: 'Request body is too large.' });
+  }
+
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
     if (err.code === 'P2002') {
-      const target = (err.meta?.target as string[])?.join(', ') || 'field';
+      // meta.target is an array of fields or an index name, depending on the constraint
+      const rawTarget = err.meta?.target;
+      const target = Array.isArray(rawTarget) ? rawTarget.join(', ') : 'value';
       return res.status(409).json({
         success: false,
         message: `A record with this ${target} already exists.`,
+      });
+    }
+
+    if (err.code === 'P2003') {
+      return res.status(400).json({
+        success: false,
+        message: 'A referenced record does not exist.',
       });
     }
 

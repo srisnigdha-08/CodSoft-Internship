@@ -27,6 +27,7 @@ export const KitchenPage: React.FC<KitchenPageProps> = ({ onNavigate }) => {
   const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [soundEnabled, setSoundEnabled] = useState(true);
+  const isStaff = !!user && (user.role === 'KITCHEN_STAFF' || user.role === 'ADMIN');
 
   async function loadKitchenFeed() {
     try {
@@ -42,10 +43,11 @@ export const KitchenPage: React.FC<KitchenPageProps> = ({ onNavigate }) => {
 
   // Poll kitchen orders every 4 seconds
   useEffect(() => {
+    if (!isStaff) return;
     loadKitchenFeed();
     const interval = setInterval(loadKitchenFeed, 4000);
     return () => clearInterval(interval);
-  }, []);
+  }, [isStaff]);
 
   const handleAdvanceStatus = async (orderId: string, targetStatus: OrderStatus) => {
     setUpdatingId(orderId);
@@ -58,6 +60,24 @@ export const KitchenPage: React.FC<KitchenPageProps> = ({ onNavigate }) => {
       setUpdatingId(null);
     }
   };
+
+  if (!isStaff) {
+    return (
+      <div className="max-w-md mx-auto py-20 px-4 text-center space-y-4">
+        <AlertCircle className="w-12 h-12 text-amber-600 mx-auto" />
+        <h2 className="font-display text-2xl font-bold">Kitchen Portal Restricted</h2>
+        <p className="text-xs text-stone-500">
+          This portal requires a kitchen staff or administrator account.
+        </p>
+        <button
+          onClick={() => onNavigate('login')}
+          className="px-5 py-2.5 rounded-full bg-charcoal-900 text-white text-xs font-bold"
+        >
+          Staff Sign In
+        </button>
+      </div>
+    );
+  }
 
   const pendingOrders = orders.filter((o) => o.status === 'PENDING' || o.status === 'CONFIRMED');
   const preparingOrders = orders.filter((o) => o.status === 'PREPARING');
@@ -81,7 +101,7 @@ export const KitchenPage: React.FC<KitchenPageProps> = ({ onNavigate }) => {
               </span>
             </div>
             <p className="text-xs text-stone-500 mt-0.5">
-              Real-time PostgreSQL kitchen queue • Auto-refreshes every 4 seconds
+              Order queue refreshes automatically every 4 seconds
             </p>
           </div>
         </div>
@@ -101,21 +121,6 @@ export const KitchenPage: React.FC<KitchenPageProps> = ({ onNavigate }) => {
           </button>
         </div>
       </div>
-
-      {/* Role Notice if not logged in as staff */}
-      {(!user || (user.role !== 'KITCHEN_STAFF' && user.role !== 'ADMIN')) && (
-        <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-center justify-between">
-          <span>
-            Previewing Kitchen Dashboard as guest/customer. To perform official status advancements, sign in with staff credentials.
-          </span>
-          <button
-            onClick={() => onNavigate('login')}
-            className="px-3 py-1 rounded-full bg-amber-600 text-white font-bold hover:bg-amber-700 ml-4 flex-shrink-0"
-          >
-            Staff Login
-          </button>
-        </div>
-      )}
 
       {/* Kanban Board 3 Columns: Incoming -> In Prep -> Ready */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -179,12 +184,12 @@ export const KitchenPage: React.FC<KitchenPageProps> = ({ onNavigate }) => {
 
                   <div className="pt-2 border-t border-cream-100">
                     <button
-                      onClick={() => handleAdvanceStatus(order.id, 'PREPARING')}
+                      onClick={() => handleAdvanceStatus(order.id, order.status === 'PENDING' ? 'CONFIRMED' : 'PREPARING')}
                       disabled={updatingId === order.id}
                       className="w-full py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs flex items-center justify-center space-x-1.5 shadow-sm transition-all"
                     >
                       <Flame className="w-3.5 h-3.5" />
-                      <span>Accept & Start Cooking</span>
+                      <span>{order.status === 'PENDING' ? 'Confirm Order' : 'Accept & Start Cooking'}</span>
                     </button>
                   </div>
                 </div>

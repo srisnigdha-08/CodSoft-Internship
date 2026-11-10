@@ -4,6 +4,11 @@ import bcrypt from 'bcryptjs';
 const prisma = new PrismaClient();
 
 async function main() {
+  // The seed creates accounts with publicly documented passwords
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('Refusing to seed demo accounts when NODE_ENV=production.');
+  }
+
   console.log('Seeding DineDesk database...');
 
   // 1. Seed Users with hashed passwords
@@ -131,7 +136,7 @@ async function main() {
       slug: 'charred-malai-paneer-tikka',
       description: 'Fresh cottage cheese cubes marinated in cardamom cream, green chili, and slow-roasted in clay tandoor.',
       price: 310.00,
-      imageUrl: 'https://images.unsplash.com/photo-1599488615731-7e5c2823ff28?auto=format&fit=crop&w=800&q=80',
+      imageUrl: '/images/charred-malai-paneer-tikka.svg',
       isVegetarian: true,
       isAvailable: true,
       preparationTimeMinutes: 15,
@@ -155,7 +160,7 @@ async function main() {
       slug: 'smoked-chicken-seekh-kebab',
       description: 'Tender minced chicken skewers infused with royal cumin, cilantro, served with house mint chutney.',
       price: 340.00,
-      imageUrl: 'https://images.unsplash.com/photo-1544025162-d76694265947?auto=format&fit=crop&w=800&q=80',
+      imageUrl: '/images/smoked-chicken-seekh-kebab.svg',
       isVegetarian: false,
       isAvailable: true,
       preparationTimeMinutes: 18,
@@ -243,7 +248,7 @@ async function main() {
       slug: 'saffron-rose-gulab-jamun',
       description: 'Warm cottage cheese dumplings steeped in saffron-scented honey syrup, garnished with pistachio slivers.',
       price: 190.00,
-      imageUrl: 'https://images.unsplash.com/photo-1589301760014-d929f3979dbc?auto=format&fit=crop&w=800&q=80',
+      imageUrl: '/images/saffron-rose-gulab-jamun.svg',
       isVegetarian: true,
       isAvailable: true,
       preparationTimeMinutes: 6,
@@ -257,7 +262,7 @@ async function main() {
       slug: 'signature-hibiscus-berry-spritz',
       description: 'Brewed Egyptian hibiscus flowers, crushed wild raspberries, sparkling soda, and fresh rosemary sprig.',
       price: 180.00,
-      imageUrl: 'https://images.unsplash.com/photo-1513558161293-cdaf765ed2fd?auto=format&fit=crop&w=800&q=80',
+      imageUrl: '/images/signature-hibiscus-berry-spritz.svg',
       isVegetarian: true,
       isAvailable: true,
       preparationTimeMinutes: 5,

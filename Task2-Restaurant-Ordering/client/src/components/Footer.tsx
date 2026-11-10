@@ -48,7 +48,7 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
               </li>
               <li>
                 <button onClick={() => onNavigate('orders')} className="hover:text-terracotta-400 transition-colors">
-                  Live Order Tracking
+                  Order Tracking
                 </button>
               </li>
               <li>

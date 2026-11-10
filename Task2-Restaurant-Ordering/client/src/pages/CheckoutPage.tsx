@@ -26,7 +26,7 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onNavigate }) => {
 
   const [customerName, setCustomerName] = useState(user?.name || '');
   const [customerEmail, setCustomerEmail] = useState(user?.email || '');
-  const [customerPhone, setCustomerPhone] = useState(user?.phone || '+91 98765 43212');
+  const [customerPhone, setCustomerPhone] = useState(user?.phone || '');
   const [deliveryAddress, setDeliveryAddress] = useState('');
   const [notes, setNotes] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('MOCK_ONLINE');
@@ -93,6 +93,7 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onNavigate }) => {
         deliveryAddress: orderType === 'DELIVERY' ? deliveryAddress.trim() : null,
         notes: notes.trim() || null,
         paymentMethod,
+        simulatePaymentFailure: paymentMethod !== 'CASH' && simulateFailure,
         items: items.map((ci) => ({
           menuItemId: ci.menuItem.id,
           quantity: ci.quantity,
@@ -102,26 +103,8 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onNavigate }) => {
 
       const createdOrder = await api.createOrder(orderData);
 
-      // If simulated failure requested for test coverage:
-      if (simulateFailure) {
-        try {
-          await api.processPaymentCheckout({
-            orderId: createdOrder.id,
-            method: paymentMethod,
-            simulateFailure: true,
-          });
-        } catch (paymentErr: any) {
-          setErrorMsg(
-            `Payment Simulation: ${paymentErr.message || 'Payment failed as requested for testing failure path'}. Order created with status PENDING.`
-          );
-          clearCart();
-          onNavigate('order-detail', createdOrder.id);
-          return;
-        }
-      }
-
       clearCart();
-      // Navigate to live order tracker page
+      // A simulated failure is shown on the tracker, which offers a retry
       onNavigate('order-detail', createdOrder.id);
     } catch (err: any) {
       console.error('Order creation error:', err);
@@ -273,15 +256,15 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onNavigate }) => {
                   <div>
                     <div className="flex items-center space-x-2">
                       <CreditCard className="w-4 h-4 text-terracotta-700" />
-                      <span className="text-sm font-bold text-charcoal-900">Online Payment Gateway</span>
+                      <span className="text-sm font-bold text-charcoal-900">Simulated Online Payment</span>
                     </div>
                     <span className="text-xs text-stone-500">
-                      Supports UPI, Cards, NetBanking (Verified development mock adapter)
+                      Demo only: no payment gateway is connected and no money is charged
                     </span>
                   </div>
                 </div>
                 <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 uppercase">
-                  Instant
+                  Test Mode
                 </span>
               </label>
 
@@ -319,8 +302,8 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onNavigate }) => {
               </label>
             </div>
 
-            {/* QA Testing: Simulation Toggle */}
-            <div className="pt-2">
+            {/* Demo: Simulated Failure Toggle (online payments only) */}
+            {paymentMethod !== 'CASH' && <div className="pt-2">
               <label className="flex items-center space-x-2 text-xs text-stone-500 cursor-pointer select-none">
                 <input
                   type="checkbox"
@@ -329,10 +312,10 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onNavigate }) => {
                   className="rounded text-terracotta-600 focus:ring-terracotta-500"
                 />
                 <span className="italic">
-                  QA Tester: Simulate Payment Decline / Gateway Failure path
+                  Demo: simulate a declined payment
                 </span>
               </label>
-            </div>
+            </div>}
           </div>
         </div>
 
@@ -400,7 +383,7 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onNavigate }) => {
 
             <div className="flex items-center justify-center space-x-1.5 text-[11px] text-stone-400">
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-              <span>Secure PostgreSQL Transaction</span>
+              <span>Simulated payment: you will not be charged</span>
             </div>
           </div>
         </div>

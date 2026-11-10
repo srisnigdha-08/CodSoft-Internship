@@ -1,71 +1,52 @@
-# DineDesk — Quality Assurance & Testing Report
+# DineDesk — Testing Report
 
-## 1. Test Execution Summary
+Results from the final audit run on 2026-11-10.
 
-- **Testing Framework:** Vitest (v2.1.9) + Supertest (v7.0.0) + React Testing Setup
-- **Target Database:** Live PostgreSQL 16.4 (`dinedesk_db`) on `localhost:5432`
-- **Total Tests Executed:** 26
-- **Passed:** 26 (100%)
-- **Failed:** 0
-- **Duration:** ~5.6s (execution)
+## 1. Environment
 
----
+| Item | Value |
+|---|---|
+| Node.js | 24.14.0 |
+| PostgreSQL | 18.6, on a temporary instance created only for this run |
+| Backend test tools | Vitest 2.1.9, Supertest 7 |
+| Test database | `dinedesk_test`, created empty, then migrated and seeded by the test setup |
 
-## 2. Test Suites & Verifications
+No development database was used.
 
-### 2.1 Server Health & CORS Security
-- `GET /health` -> Verified HTTP 200 with service metadata and environment status.
-- CORS Allowed Origin -> Verified HTTP 200 and headers `Access-Control-Allow-Origin: http://localhost:3000` + `Access-Control-Allow-Credentials: true`.
-- CORS Unauthorized Origin -> Verified HTTP 403 Forbidden rejection when request originates from untrusted domain (`http://malicious-attacker-site.com`).
+## 2. Results
 
-### 2.2 Authentication & Role-Based Authorization
-- `POST /api/v1/auth/register` -> Verified customer registration, password bcrypt hashing, token generation, and duplicate email prevention.
-- `POST /api/v1/auth/login` -> Verified rejection of invalid credentials (HTTP 401).
-- `GET /api/v1/auth/me` -> Verified identity resolution from JWT token.
-- `GET /api/v1/admin/stats` -> Verified HTTP 401 on unauthenticated access and HTTP 403 Forbidden for non-admin customer tokens.
+| Check | Command | Result |
+|---|---|---|
+| Backend tests | `npm run test` | 71 passed / 71 |
+| TypeScript (server and client) | `npm run typecheck` | Pass |
+| TypeScript (test files) | `tsc --noEmit` on `server/tests` | Pass |
+| Production builds (server and client) | `npm run build` | Pass |
+| Frontend automated tests | None exist | Not applicable |
+| Lint | Not configured | Not applicable |
 
-### 2.3 Menu Catalog & Database Filtering
-- `GET /api/v1/categories` -> Verified category array returned directly from PostgreSQL.
-- `GET /api/v1/menu?vegetarian=true` -> Verified query parameter filtering ensuring all returned dishes have `isVegetarian === true`.
-- `GET /api/v1/menu/:id` -> Verified single item retrieval with category relation.
+## 3. Backend Test Coverage
 
-### 2.4 Cart & Order Recalculation
-- `POST /api/v1/orders` -> Verified that line items, subtotals, 5% GST, and delivery fees are computed by the server rather than trusting frontend submitted values.
-- Delivery Address Validation -> Verified that delivery orders without street addresses are rejected with HTTP 400.
-- Customer Ownership Check -> Verified that customer accounts can only view their own orders (`/api/v1/orders/:id`).
-- Private Order Protection -> Verified that unauthenticated requests to view account orders receive HTTP 401, and other customers receive HTTP 403 Forbidden.
+All tests are in `server/tests/api.test.ts` and call the Express app against real PostgreSQL.
 
-### 2.5 Kitchen Operations & State Machine
-- `GET /api/v1/kitchen/orders` -> Verified kitchen queue retrieval for staff.
-- Permitted Status Advances -> Successfully verified transitions: `PENDING` -> `CONFIRMED` -> `PREPARING` -> `READY`.
-- Transition Violation Guard -> Verified that invalid transitions (e.g. `READY` -> `PREPARING`) are rejected with HTTP 400.
+- **Health and CORS:** configured origin allowed with credentials, other origins (including other localhost ports) rejected, preflight.
+- **Authentication:** registration, login, HttpOnly cookie, no token in JSON, cookie-only requests, logout clearing the cookie, expired, wrongly signed and unsigned tokens rejected, bcrypt storage, no self-assigned roles.
+- **Authorization:** customers and guests rejected from kitchen and admin endpoints, kitchen staff rejected from admin endpoints, role promotion, no self role change, order and reservation history require sign-in.
+- **Menu:** categories, filters, item lookup, invalid input, non-existent category.
+- **Orders:** server-side totals that ignore client values, GST, delivery fee, delivery address rules, quantity limits, unknown and sold-out items, repeated dishes, ownership.
+- **Lifecycle:** full `PENDING → CONFIRMED → PREPARING → READY → COMPLETED`, status history, rejected jumps, simultaneous updates, customer and kitchen cancellation with simulated refund, cash marked collected on completion.
+- **Simulated payments:** decline and retry, double payment rejected, cash rejected online, ownership.
+- **Reservations:** availability, invalid and past dates, capacity, double booking, concurrent specific-table and auto-allocated bookings, the database unique index tested directly, no reviving a cancelled booking, cancelling your own booking only.
+- **Error handling:** malformed JSON, unknown API routes, invalid query parameters.
 
-### 2.6 Table Reservations & Concurrency Protection
-- `GET /api/v1/reservations/availability` -> Verified real-time table availability check.
-- `POST /api/v1/reservations` -> Successfully created and allocated reservation in PostgreSQL.
-- Double-Booking Prevention -> Re-submitted identical reservation for the same table and time slot, confirming database conflict rejection with HTTP 409 Conflict.
-- Concurrency Serialization -> Dispatched simultaneous concurrent requests for the identical table and slot using `Promise.all()`, confirming that PostgreSQL row locks (`SELECT ... FOR UPDATE`) safely serialize the transaction, allowing exactly 1 confirmation (201) and 1 conflict rejection (409).
+## 4. Other Verification
 
-### 2.7 Payment Abstraction & Failure Path Simulation
-- `POST /api/v1/payments/checkout` with `simulateFailure: true` -> Verified simulation failure path returning HTTP 402 Payment Required and marking payment as `FAILED`.
-- Successful checkout -> Verified transaction reference generation and automatic order status promotion.
+- **Test isolation:** `npm test` refused to run with no `TEST_DATABASE_URL`, with a database name lacking `test`, and with the same database as `DATABASE_URL`.
+- **Startup safety:** the server refused to start with no `JWT_SECRET`, and with placeholder secrets when `NODE_ENV=production`. The seed refused to run in production.
+- **Migrations:** applied to an empty database. A database created with `prisma db push` and containing data was upgraded with no row loss. `prisma migrate diff` reported no drift from `schema.prisma`.
+- **CORS over HTTP:** `curl` confirmed the allowed origin receives credentialed CORS headers and other origins receive 403.
+- **Browser walkthrough (development build):** guest restrictions; customer login, session kept after reload; menu filters and search; cart; dine-in cash and delivery checkout; totals matching between cart and server; simulated decline, retry and cancel; order history; reservation and cancellation; kitchen board through all statuses; admin metrics, dish creation, reservation actions, table toggle, role controls; logout. At 375px width, the home, menu, reservation and restricted pages had no horizontal overflow.
 
-### 2.8 Admin Management
-- `GET /api/v1/admin/stats` -> Verified real-time operational revenue calculation and popular dishes breakdown.
-- `GET /api/v1/admin/users` -> Verified user list retrieval and role update capabilities.
+## 5. Not Covered
 
----
-
-## 3. Frontend Production Build Verification
-
-- **Command:** `npm --prefix client run build`
-- **Result:**
-  ```text
-  vite v5.4.21 building for production...
-  ✓ 1590 modules transformed.
-  dist/index.html                   1.20 kB │ gzip:  0.73 kB
-  dist/assets/index-ST6GvaNB.css   43.82 kB │ gzip:  7.36 kB
-  dist/assets/index-B309tBfV.js   293.28 kB │ gzip: 74.24 kB
-  ✓ built in 34.42s
-  ```
-- **Exit Code:** 0 (Successful, zero TypeScript compiler errors).
+- The frontend has no automated tests. Its behavior was checked manually as listed above.
+- The production build was compiled but not deployed or exercised with HTTPS.

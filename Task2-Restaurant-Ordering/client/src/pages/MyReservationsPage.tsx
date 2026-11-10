@@ -20,15 +20,22 @@ export const MyReservationsPage: React.FC<MyReservationsPageProps> = ({ onNaviga
   const { user } = useAuth();
   const [reservations, setReservations] = useState<Reservation[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     async function load() {
+      if (!user) {
+        setReservations([]);
+        setLoading(false);
+        return;
+      }
       setLoading(true);
+      setLoadError(null);
       try {
-        const list = await api.getMyReservations(user?.email || undefined);
+        const list = await api.getMyReservations();
         setReservations(list);
-      } catch (err) {
-        console.error('Failed to load reservations', err);
+      } catch (err: any) {
+        setLoadError(err.message || 'Failed to load your reservations.');
       } finally {
         setLoading(false);
       }
@@ -41,7 +48,7 @@ export const MyReservationsPage: React.FC<MyReservationsPageProps> = ({ onNaviga
     if (!confirm) return;
 
     try {
-      const updated = await api.updateReservationStatus(id, 'CANCELLED');
+      await api.cancelMyReservation(id);
       setReservations((prev) =>
         prev.map((r) => (r.id === id ? { ...r, status: 'CANCELLED' } : r))
       );
@@ -49,6 +56,22 @@ export const MyReservationsPage: React.FC<MyReservationsPageProps> = ({ onNaviga
       alert(err.message || 'Failed to cancel reservation');
     }
   };
+
+  if (!user) {
+    return (
+      <div className="max-w-md mx-auto py-20 px-4 text-center space-y-4">
+        <CalendarDays className="w-12 h-12 text-stone-400 mx-auto" />
+        <h2 className="font-display text-2xl font-bold">Sign In to See Your Reservations</h2>
+        <p className="text-xs text-stone-500">Booking history is available for signed-in customers.</p>
+        <button
+          onClick={() => onNavigate('login')}
+          className="px-5 py-2.5 rounded-full bg-terracotta-700 text-white text-xs font-bold"
+        >
+          Sign In
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-8">
@@ -69,6 +92,10 @@ export const MyReservationsPage: React.FC<MyReservationsPageProps> = ({ onNaviga
           Book Another Table
         </button>
       </div>
+
+      {loadError && (
+        <p className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs">{loadError}</p>
+      )}
 
       {loading ? (
         <div className="space-y-4">

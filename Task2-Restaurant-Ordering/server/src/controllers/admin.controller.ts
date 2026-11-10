@@ -4,6 +4,14 @@ import prisma from '../prisma';
 import { OrderStatus, Role } from '@prisma/client';
 import { BadRequestError, NotFoundError } from '../utils/errors';
 import { sendSuccess } from '../utils/response';
+import { localDateString } from '../utils/date';
+
+const adminOrdersQuerySchema = z.object({
+  status: z.nativeEnum(OrderStatus).optional(),
+  search: z.string().trim().max(100).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(10),
+});
 
 export async function getAdminStats(req: Request, res: Response, next: NextFunction) {
   try {
@@ -21,7 +29,7 @@ export async function getAdminStats(req: Request, res: Response, next: NextFunct
 
     const totalRevenue = completedOrders.reduce((sum, o) => sum + Number(o.totalAmount), 0);
 
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = localDateString();
     const todayReservations = await prisma.reservation.count({
       where: { reservationDate: todayStr },
     });
@@ -33,6 +41,7 @@ export async function getAdminStats(req: Request, res: Response, next: NextFunct
     // Top selling items by order items quantity
     const orderItemsGrouped = await prisma.orderItem.groupBy({
       by: ['name'],
+      where: { order: { status: { not: OrderStatus.CANCELLED } } },
       _sum: { quantity: true, subtotal: true },
       orderBy: { _sum: { quantity: 'desc' } },
       take: 5,
@@ -61,17 +70,15 @@ export async function getAdminStats(req: Request, res: Response, next: NextFunct
 
 export async function getAdminOrders(req: Request, res: Response, next: NextFunction) {
   try {
-    const { status, search, page = '1', limit = '10' } = req.query;
-    const pageNum = parseInt(String(page), 10);
-    const limitNum = parseInt(String(limit), 10);
+    const { status, search, page: pageNum, limit: limitNum } = adminOrdersQuerySchema.parse(req.query);
     const skip = (pageNum - 1) * limitNum;
 
     const where: any = {};
     if (status) {
-      where.status = status as OrderStatus;
+      where.status = status;
     }
     if (search) {
-      const term = String(search).trim();
+      const term = search;
       where.OR = [
         { orderNumber: { contains: term, mode: 'insensitive' } },
         { customerName: { contains: term, mode: 'insensitive' } },
@@ -139,6 +146,11 @@ export async function updateUserRole(req: Request, res: Response, next: NextFunc
   try {
     const { id } = req.params;
     const validated = updateUserRoleSchema.parse(req.body);
+
+    // Prevents an administrator from accidentally locking everyone out of the admin area
+    if (id === req.user?.userId) {
+      throw new BadRequestError('You cannot change your own role.');
+    }
 
     const user = await prisma.user.findUnique({
       where: { id },

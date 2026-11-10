@@ -2,7 +2,32 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import request from 'supertest';
 import app from '../src/app';
 import prisma from '../src/prisma';
-import { Role, OrderStatus, PaymentStatus } from '@prisma/client';
+import fs from 'fs';
+import path from 'path';
+import jwt from 'jsonwebtoken';
+import { Role, OrderStatus, PaymentStatus, ReservationStatus } from '@prisma/client';
+
+// The JWT is only delivered through the HttpOnly cookie, so tests read it from Set-Cookie
+function tokenFromResponse(res: request.Response): string {
+  const cookies = res.headers['set-cookie'] as unknown as string[];
+  const cookie = cookies.find((c) => c.startsWith('dinedesk_token='))!;
+  return cookie.split(';')[0].split('=')[1];
+}
+
+// Dates relative to today so the suite does not expire
+function futureDate(daysAhead: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() + daysAhead);
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+const reservationDate = futureDate(10);
+const concurrentDate = futureDate(12);
+const guardDate = futureDate(14);
+const autoAllocateDate = futureDate(16);
+const customerCancelDate = futureDate(18);
 
 describe('DineDesk Full Backend Test Suite', () => {
   let customerToken: string;
@@ -18,17 +43,17 @@ describe('DineDesk Full Backend Test Suite', () => {
     const customerRes = await request(app)
       .post('/api/v1/auth/login')
       .send({ email: 'customer@dinedesk.local', password: 'Customer@12345' });
-    customerToken = customerRes.body.data.token;
+    customerToken = tokenFromResponse(customerRes);
 
     const adminRes = await request(app)
       .post('/api/v1/auth/login')
       .send({ email: 'admin@dinedesk.local', password: 'Admin@12345' });
-    adminToken = adminRes.body.data.token;
+    adminToken = tokenFromResponse(adminRes);
 
     const kitchenRes = await request(app)
       .post('/api/v1/auth/login')
       .send({ email: 'kitchen@dinedesk.local', password: 'Kitchen@12345' });
-    kitchenToken = kitchenRes.body.data.token;
+    kitchenToken = tokenFromResponse(kitchenRes);
 
     // Fetch a sample menu item and table
     const menuItem = await prisma.menuItem.findFirst();
@@ -42,7 +67,7 @@ describe('DineDesk Full Backend Test Suite', () => {
       where: {
         OR: [
           { customerEmail: { in: ['aarav@example.com', 'diff@example.com', 'concurrent1@example.com', 'concurrent2@example.com'] } },
-          { reservationDate: { in: ['2026-11-20', '2026-11-21', '2026-11-22'] } },
+          { reservationDate: { in: [reservationDate, concurrentDate, guardDate, autoAllocateDate, customerCancelDate] } },
         ],
       },
     });
@@ -77,6 +102,22 @@ describe('DineDesk Full Backend Test Suite', () => {
     });
   });
 
+  it('CORS - rejects a localhost origin that is not the configured FRONTEND_ORIGIN', async () => {
+    const res = await request(app).get('/health').set('Origin', 'http://localhost:5173');
+    expect(res.status).toBe(403);
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+  });
+
+  it('CORS - preflight for the configured origin allows credentials', async () => {
+    const res = await request(app)
+      .options('/api/v1/auth/login')
+      .set('Origin', 'http://localhost:3000')
+      .set('Access-Control-Request-Method', 'POST');
+    expect(res.status).toBe(204);
+    expect(res.headers['access-control-allow-origin']).toBe('http://localhost:3000');
+    expect(res.headers['access-control-allow-credentials']).toBe('true');
+  });
+
   // 2. Auth tests
   describe('Authentication & Roles', () => {
     it('POST /api/v1/auth/register - registers a new customer', async () => {
@@ -94,7 +135,8 @@ describe('DineDesk Full Backend Test Suite', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.data.user.email).toBe(email);
       expect(res.body.data.user.role).toBe(Role.CUSTOMER);
-      expect(res.body.data.token).toBeDefined();
+      expect(res.body.data.token).toBeUndefined();
+      expect(tokenFromResponse(res)).toBeTruthy();
     });
 
     it('POST /api/v1/auth/login - rejects invalid credentials', async () => {
@@ -221,7 +263,7 @@ describe('DineDesk Full Backend Test Suite', () => {
           email: otherUserEmail,
           password: 'Password@123',
         });
-      const otherToken = regRes.body.data.token;
+      const otherToken = tokenFromResponse(regRes);
 
       const res = await request(app)
         .get(`/api/v1/orders/${createdOrderId}`)
@@ -276,7 +318,7 @@ describe('DineDesk Full Backend Test Suite', () => {
 
   // 6. Table Reservations & Double-Booking Prevention
   describe('Table Reservations', () => {
-    const testDate = '2026-11-20';
+    const testDate = reservationDate;
     const testTime = '20:00';
 
     it('GET /api/v1/reservations/availability - checks table availability', async () => {
@@ -323,7 +365,6 @@ describe('DineDesk Full Backend Test Suite', () => {
     });
 
     it('POST /api/v1/reservations - concurrency test: simultaneous requests serialize and prevent double booking', async () => {
-      const concurrentDate = '2026-11-22';
       const concurrentTime = '19:00';
 
       const [res1, res2] = await Promise.all([
@@ -406,6 +447,548 @@ describe('DineDesk Full Backend Test Suite', () => {
 
       expect(res.status).toBe(200);
       expect(Array.isArray(res.body.data.users)).toBe(true);
+    });
+  });
+
+  // 9. Session security
+  describe('Session security', () => {
+    const payload = { userId: 'x', email: 'x@example.com', role: Role.ADMIN, name: 'X' };
+
+    it('login sets an HttpOnly SameSite cookie and does not expose the token in JSON', async () => {
+      const res = await request(app)
+        .post('/api/v1/auth/login')
+        .send({ email: 'customer@dinedesk.local', password: 'Customer@12345' });
+      const cookie = (res.headers['set-cookie'] as unknown as string[])[0];
+      expect(cookie).toMatch(/HttpOnly/i);
+      expect(cookie).toMatch(/SameSite=Lax/i);
+      expect(res.body.data.token).toBeUndefined();
+      expect(res.body.data.user.password).toBeUndefined();
+    });
+
+    it('a browser-style request authenticates with the cookie alone', async () => {
+      const res = await request(app).get('/api/v1/auth/me').set('Cookie', `dinedesk_token=${customerToken}`);
+      expect(res.status).toBe(200);
+    });
+
+    it('logout clears the authentication cookie', async () => {
+      const res = await request(app).post('/api/v1/auth/logout');
+      const cookie = (res.headers['set-cookie'] as unknown as string[])[0];
+      expect(cookie).toMatch(/^dinedesk_token=;/);
+      expect(cookie).toMatch(/Expires=Thu, 01 Jan 1970/);
+    });
+
+    it('rejects expired tokens', async () => {
+      const token = jwt.sign(payload, process.env.JWT_SECRET!, { expiresIn: -10 });
+      const res = await request(app).get('/api/v1/admin/stats').set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(401);
+    });
+
+    it('rejects tokens signed with a different secret', async () => {
+      const token = jwt.sign(payload, 'a-different-secret');
+      const res = await request(app).get('/api/v1/admin/stats').set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(401);
+    });
+
+    it('rejects unsigned (alg: none) tokens', async () => {
+      const encode = (value: object) => Buffer.from(JSON.stringify(value)).toString('base64url');
+      const token = `${encode({ alg: 'none', typ: 'JWT' })}.${encode(payload)}.`;
+      const res = await request(app).get('/api/v1/admin/stats').set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(401);
+    });
+
+    it('stores passwords as bcrypt hashes', async () => {
+      const user = await prisma.user.findUnique({ where: { email: 'customer@dinedesk.local' } });
+      expect(user!.password).toMatch(/^\$2[aby]\$/);
+    });
+
+    it('rejects self-assigned roles at registration', async () => {
+      const res = await request(app).post('/api/v1/auth/register').send({
+        name: 'Sneaky',
+        email: `sneaky_${Date.now()}@example.com`,
+        password: 'Password@123',
+        role: 'ADMIN',
+      });
+      expect(res.status).toBe(201);
+      expect(res.body.data.user.role).toBe(Role.CUSTOMER);
+    });
+  });
+
+  // 10. Role boundaries
+  describe('Role boundaries', () => {
+    const asCustomer = (req: request.Test) => req.set('Authorization', `Bearer ${customerToken}`);
+
+    it('customer cannot use kitchen endpoints', async () => {
+      expect((await asCustomer(request(app).get('/api/v1/kitchen/orders'))).status).toBe(403);
+      const patch = await asCustomer(request(app).patch(`/api/v1/kitchen/orders/${createdOrderId}/status`)).send({ status: 'COMPLETED' });
+      expect(patch.status).toBe(403);
+    });
+
+    it('unauthenticated users cannot use kitchen endpoints', async () => {
+      expect((await request(app).get('/api/v1/kitchen/orders')).status).toBe(401);
+    });
+
+    it('customer cannot manage menu, tables, users or all reservations', async () => {
+      expect((await asCustomer(request(app).post('/api/v1/menu')).send({})).status).toBe(403);
+      expect((await asCustomer(request(app).post('/api/v1/categories')).send({})).status).toBe(403);
+      expect((await asCustomer(request(app).post('/api/v1/tables')).send({})).status).toBe(403);
+      expect((await asCustomer(request(app).get('/api/v1/admin/users'))).status).toBe(403);
+      expect((await asCustomer(request(app).get('/api/v1/reservations'))).status).toBe(403);
+    });
+
+    it('kitchen staff cannot use admin endpoints', async () => {
+      const res = await request(app).get('/api/v1/admin/stats').set('Authorization', `Bearer ${kitchenToken}`);
+      expect(res.status).toBe(403);
+    });
+
+    it('admin can promote another user but not change their own role', async () => {
+      const email = `promote_${Date.now()}@example.com`;
+      const reg = await request(app).post('/api/v1/auth/register').send({ name: 'Promote Me', email, password: 'Password@123' });
+      const promoted = await request(app)
+        .patch(`/api/v1/admin/users/${reg.body.data.user.id}/role`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ role: 'KITCHEN_STAFF' });
+      expect(promoted.status).toBe(200);
+      expect(promoted.body.data.user.role).toBe('KITCHEN_STAFF');
+
+      const admin = await prisma.user.findUnique({ where: { email: 'admin@dinedesk.local' } });
+      const self = await request(app)
+        .patch(`/api/v1/admin/users/${admin!.id}/role`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ role: 'CUSTOMER' });
+      expect(self.status).toBe(400);
+    });
+
+    it('order and reservation history require authentication', async () => {
+      expect((await request(app).get('/api/v1/orders/my?email=customer@dinedesk.local')).status).toBe(401);
+      expect((await request(app).get('/api/v1/reservations/my?email=customer@dinedesk.local')).status).toBe(401);
+    });
+  });
+
+  // 11. Business rules and validation
+  describe('Order rules and input validation', () => {
+    const base = {
+      customerName: 'Rule Tester',
+      customerEmail: 'rules@example.com',
+      customerPhone: '+91 98765 00000',
+    };
+    const post = (body: object) => request(app).post('/api/v1/orders').send({ ...base, ...body });
+    let pickupOrderId: string;
+
+    it('ignores client-supplied totals and prices', async () => {
+      const item = await prisma.menuItem.findUnique({ where: { id: testMenuItemId } });
+      const res = await post({
+        orderType: 'PICKUP',
+        paymentMethod: 'MOCK_ONLINE',
+        subtotal: 1,
+        totalAmount: 1,
+        items: [{ menuItemId: testMenuItemId, quantity: 3, price: 0.01 }],
+      });
+      expect(res.status).toBe(201);
+      pickupOrderId = res.body.data.order.id;
+      const expectedSubtotal = Number(item!.price) * 3;
+      const expectedTax = Number((expectedSubtotal * 0.05).toFixed(2));
+      expect(Number(res.body.data.order.subtotal)).toBe(expectedSubtotal);
+      expect(Number(res.body.data.order.tax)).toBe(expectedTax);
+      expect(Number(res.body.data.order.deliveryFee)).toBe(0);
+      expect(Number(res.body.data.order.totalAmount)).toBe(expectedSubtotal + expectedTax);
+    });
+
+    it('adds the delivery fee only for delivery orders', async () => {
+      const res = await post({
+        orderType: 'DELIVERY',
+        deliveryAddress: '12 Test Street, Hyderabad',
+        items: [{ menuItemId: testMenuItemId, quantity: 1 }],
+      });
+      expect(res.status).toBe(201);
+      expect(Number(res.body.data.order.deliveryFee)).toBe(40);
+    });
+
+    it('rejects a whitespace-only delivery address', async () => {
+      const res = await post({ orderType: 'DELIVERY', deliveryAddress: '       ', items: [{ menuItemId: testMenuItemId, quantity: 1 }] });
+      expect(res.status).toBe(400);
+    });
+
+    it('rejects zero, negative, fractional and excessive quantities', async () => {
+      for (const quantity of [0, -1, 1.5, 51]) {
+        const res = await post({ orderType: 'PICKUP', items: [{ menuItemId: testMenuItemId, quantity }] });
+        expect(res.status).toBe(400);
+      }
+    });
+
+    it('rejects empty carts and unknown menu items', async () => {
+      expect((await post({ orderType: 'PICKUP', items: [] })).status).toBe(400);
+      const unknown = await post({ orderType: 'PICKUP', items: [{ menuItemId: '00000000-0000-4000-8000-000000000000', quantity: 1 }] });
+      expect(unknown.status).toBe(400);
+    });
+
+    it('accepts the same dish on two lines and totals both', async () => {
+      const item = await prisma.menuItem.findUnique({ where: { id: testMenuItemId } });
+      const res = await post({
+        orderType: 'PICKUP',
+        items: [
+          { menuItemId: testMenuItemId, quantity: 1, notes: 'mild' },
+          { menuItemId: testMenuItemId, quantity: 2, notes: 'spicy' },
+        ],
+      });
+      expect(res.status).toBe(201);
+      expect(Number(res.body.data.order.subtotal)).toBe(Number(item!.price) * 3);
+    });
+
+    it('rejects sold-out items', async () => {
+      const soldOut = await prisma.menuItem.findFirst({ where: { slug: 'artisan-cold-brew-coffee' } });
+      await prisma.menuItem.update({ where: { id: soldOut!.id }, data: { isAvailable: false } });
+      try {
+        const res = await post({ orderType: 'PICKUP', items: [{ menuItemId: soldOut!.id, quantity: 1 }] });
+        expect(res.status).toBe(400);
+        expect(res.body.message).toMatch(/sold out/i);
+      } finally {
+        await prisma.menuItem.update({ where: { id: soldOut!.id }, data: { isAvailable: true } });
+      }
+    });
+
+    it('does not store a table on non dine-in orders, so bad IDs cannot cause a server error', async () => {
+      const res = await post({
+        orderType: 'PICKUP',
+        tableId: '00000000-0000-4000-8000-000000000000',
+        items: [{ menuItemId: testMenuItemId, quantity: 1 }],
+      });
+      expect(res.status).toBe(201);
+      expect(res.body.data.order.tableId).toBeNull();
+    });
+
+    it('returns 400 for malformed JSON and JSON 404 for unknown API routes', async () => {
+      const malformed = await request(app).post('/api/v1/auth/login').set('Content-Type', 'application/json').send('{not json');
+      expect(malformed.status).toBe(400);
+      const missing = await request(app).get('/api/v1/does-not-exist');
+      expect(missing.status).toBe(404);
+      expect(missing.body.success).toBe(false);
+    });
+
+    it('returns 400 rather than 500 for invalid query parameters', async () => {
+      const staff = { Authorization: `Bearer ${adminToken}` };
+      expect((await request(app).get('/api/v1/kitchen/orders?status=NOPE').set(staff)).status).toBe(400);
+      expect((await request(app).get('/api/v1/admin/orders?page=abc').set(staff)).status).toBe(400);
+      expect((await request(app).get('/api/v1/reservations?status=NOPE').set(staff)).status).toBe(400);
+      expect((await request(app).get(`/api/v1/reservations/availability?date=${reservationDate}&time=20:00&guestCount=abc`)).status).toBe(400);
+    });
+
+    it('rejects invalid menu input and a non-existent category', async () => {
+      const staff = { Authorization: `Bearer ${adminToken}` };
+      const invalid = await request(app).post('/api/v1/menu').set(staff).send({ name: 'x', price: -5 });
+      expect(invalid.status).toBe(400);
+      const badCategory = await request(app).patch(`/api/v1/menu/${testMenuItemId}`).set(staff).send({ categoryId: '00000000-0000-4000-8000-000000000000' });
+      expect(badCategory.status).toBe(400);
+    });
+
+    it('accepts absolute image URLs and local image paths, but not protocol-relative URLs', async () => {
+      const staff = { Authorization: `Bearer ${adminToken}` };
+      const dish = await prisma.menuItem.findUnique({ where: { slug: 'charred-malai-paneer-tikka' } });
+      const url = `/api/v1/menu/${dish!.id}`;
+      expect(dish!.imageUrl).toBe('/images/charred-malai-paneer-tikka.svg');
+      expect((await request(app).patch(url).set(staff).send({ imageUrl: dish!.imageUrl })).status).toBe(200);
+      expect((await request(app).patch(url).set(staff).send({ imageUrl: 'https://example.com/dish.png' })).status).toBe(200);
+      expect((await request(app).patch(url).set(staff).send({ imageUrl: '//example.com/dish.png' })).status).toBe(400);
+      expect((await request(app).patch(url).set(staff).send({ imageUrl: 'not a url' })).status).toBe(400);
+      await prisma.menuItem.update({ where: { id: dish!.id }, data: { imageUrl: dish!.imageUrl } });
+    });
+
+    it('every local image path used by a seeded dish exists in the frontend', async () => {
+      const dishes = await prisma.menuItem.findMany({ where: { imageUrl: { startsWith: '/images/' } } });
+      expect(dishes.map((d) => d.slug).sort()).toEqual([
+        'charred-malai-paneer-tikka',
+        'saffron-rose-gulab-jamun',
+        'signature-hibiscus-berry-spritz',
+        'smoked-chicken-seekh-kebab',
+      ]);
+      for (const dish of dishes) {
+        expect(fs.existsSync(path.resolve(__dirname, '../../client/public', `.${dish.imageUrl}`))).toBe(true);
+      }
+    });
+
+    it('guest orders are not readable by their short order number', async () => {
+      const order = await prisma.order.findUnique({ where: { id: pickupOrderId } });
+      const byNumber = await request(app).get(`/api/v1/orders/${order!.orderNumber}`);
+      expect(byNumber.status).toBe(404);
+      const byUuid = await request(app).get(`/api/v1/orders/${order!.id}`);
+      expect(byUuid.status).toBe(200);
+    });
+  });
+
+  // 12. Full lifecycle and cancellation
+  describe('Order lifecycle', () => {
+    const staff = () => ({ Authorization: `Bearer ${kitchenToken}` });
+    const advance = (id: string, status: string) =>
+      request(app).patch(`/api/v1/kitchen/orders/${id}/status`).set(staff()).send({ status });
+    const cashOrder = async () =>
+      (
+        await request(app)
+          .post('/api/v1/orders')
+          .set('Authorization', `Bearer ${customerToken}`)
+          .send({
+            customerName: 'Priya Sharma',
+            customerEmail: 'customer@dinedesk.local',
+            customerPhone: '+91 98765 43212',
+            orderType: 'DINE_IN',
+            paymentMethod: 'CASH',
+            items: [{ menuItemId: testMenuItemId, quantity: 1 }],
+          })
+      ).body.data.order;
+
+    it('walks PENDING → CONFIRMED → PREPARING → READY → COMPLETED and records history', async () => {
+      const order = await cashOrder();
+      expect(order.status).toBe('PENDING');
+      expect(order.payment.status).toBe('PENDING');
+
+      for (const status of ['CONFIRMED', 'PREPARING', 'READY', 'COMPLETED']) {
+        const res = await advance(order.id, status);
+        expect(res.status).toBe(200);
+        expect(res.body.data.order.status).toBe(status);
+      }
+
+      const final = await prisma.order.findUnique({ where: { id: order.id }, include: { payment: true, statusHistory: true } });
+      expect(final!.payment!.status).toBe(PaymentStatus.SUCCESSFUL);
+      expect(final!.statusHistory).toHaveLength(5);
+    });
+
+    it('rejects skipping PENDING → PREPARING', async () => {
+      const order = await cashOrder();
+      expect((await advance(order.id, 'PREPARING')).status).toBe(400);
+    });
+
+    it('allows only one of two simultaneous status updates', async () => {
+      const order = await cashOrder();
+      const results = await Promise.all([advance(order.id, 'CONFIRMED'), advance(order.id, 'CONFIRMED')]);
+      expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+      const history = await prisma.orderStatusHistory.count({ where: { orderId: order.id } });
+      expect(history).toBe(2);
+    });
+
+    it('customer can cancel while CONFIRMED and the simulated payment is refunded', async () => {
+      const res = await request(app)
+        .post('/api/v1/orders')
+        .set('Authorization', `Bearer ${customerToken}`)
+        .send({
+          customerName: 'Priya Sharma',
+          customerEmail: 'customer@dinedesk.local',
+          customerPhone: '+91 98765 43212',
+          orderType: 'PICKUP',
+          paymentMethod: 'MOCK_ONLINE',
+          items: [{ menuItemId: testMenuItemId, quantity: 1 }],
+        });
+      const cancelled = await request(app)
+        .patch(`/api/v1/orders/${res.body.data.order.id}/cancel`)
+        .set('Authorization', `Bearer ${customerToken}`)
+        .send({ reason: 'Changed my mind' });
+      expect(cancelled.status).toBe(200);
+      expect(cancelled.body.data.order.status).toBe('CANCELLED');
+      expect(cancelled.body.data.order.payment.status).toBe(PaymentStatus.REFUNDED);
+    });
+
+    it('customer cannot cancel once preparation has started, or cancel another account order', async () => {
+      const order = await cashOrder();
+      const otherReg = await request(app).post('/api/v1/auth/register').send({
+        name: 'Other',
+        email: `other_cancel_${Date.now()}@example.com`,
+        password: 'Password@123',
+      });
+      const otherCancel = await request(app)
+        .patch(`/api/v1/orders/${order.id}/cancel`)
+        .set('Authorization', `Bearer ${tokenFromResponse(otherReg)}`)
+        .send({});
+      expect(otherCancel.status).toBe(403);
+
+      await advance(order.id, 'CONFIRMED');
+      await advance(order.id, 'PREPARING');
+      const late = await request(app)
+        .patch(`/api/v1/orders/${order.id}/cancel`)
+        .set('Authorization', `Bearer ${customerToken}`)
+        .send({});
+      expect(late.status).toBe(400);
+    });
+
+    it('kitchen cancellation refunds a simulated payment', async () => {
+      const res = await request(app)
+        .post('/api/v1/orders')
+        .send({
+          customerName: 'Guest',
+          customerEmail: 'guest@example.com',
+          customerPhone: '+91 98765 11111',
+          orderType: 'PICKUP',
+          paymentMethod: 'MOCK_ONLINE',
+          items: [{ menuItemId: testMenuItemId, quantity: 1 }],
+        });
+      const cancelled = await advance(res.body.data.order.id, 'CANCELLED');
+      expect(cancelled.status).toBe(200);
+      expect(cancelled.body.data.order.payment.status).toBe(PaymentStatus.REFUNDED);
+    });
+  });
+
+  // 13. Simulated payments
+  describe('Simulated payments', () => {
+    const orderBody = {
+      customerName: 'Pay Tester',
+      customerEmail: 'customer@dinedesk.local',
+      customerPhone: '+91 98765 22222',
+      orderType: 'PICKUP',
+      paymentMethod: 'MOCK_ONLINE',
+      items: [] as object[],
+    };
+
+    it('a simulated decline leaves the order PENDING and a retry confirms it', async () => {
+      const created = await request(app)
+        .post('/api/v1/orders')
+        .send({ ...orderBody, items: [{ menuItemId: testMenuItemId, quantity: 1 }], simulatePaymentFailure: true });
+      expect(created.status).toBe(201);
+      expect(created.body.data.order.status).toBe(OrderStatus.PENDING);
+      expect(created.body.data.order.payment.status).toBe(PaymentStatus.FAILED);
+
+      const retry = await request(app)
+        .post('/api/v1/payments/checkout')
+        .send({ orderId: created.body.data.order.id, method: 'MOCK_ONLINE' });
+      expect(retry.status).toBe(200);
+      expect(retry.body.data.payment.status).toBe(PaymentStatus.SUCCESSFUL);
+
+      const order = await prisma.order.findUnique({ where: { id: created.body.data.order.id } });
+      expect(order!.status).toBe(OrderStatus.CONFIRMED);
+    });
+
+    it('rejects a second payment and cash through the online endpoint', async () => {
+      const created = await request(app)
+        .post('/api/v1/orders')
+        .send({ ...orderBody, items: [{ menuItemId: testMenuItemId, quantity: 1 }] });
+      const again = await request(app)
+        .post('/api/v1/payments/checkout')
+        .send({ orderId: created.body.data.order.id, method: 'CARD' });
+      expect(again.status).toBe(400);
+      const cash = await request(app)
+        .post('/api/v1/payments/checkout')
+        .send({ orderId: created.body.data.order.id, method: 'CASH' });
+      expect(cash.status).toBe(400);
+    });
+
+    it("a customer cannot pay or inspect another account's order payment", async () => {
+      const otherReg = await request(app).post('/api/v1/auth/register').send({
+        name: 'Other Payer',
+        email: `other_pay_${Date.now()}@example.com`,
+        password: 'Password@123',
+      });
+      const otherToken = tokenFromResponse(otherReg);
+
+      const pay = await request(app)
+        .post('/api/v1/payments/checkout')
+        .set('Authorization', `Bearer ${otherToken}`)
+        .send({ orderId: createdOrderId, method: 'CARD' });
+      expect(pay.status).toBe(403);
+
+      const read = await request(app)
+        .get(`/api/v1/payments/${createdOrderId}`)
+        .set('Authorization', `Bearer ${otherToken}`);
+      expect(read.status).toBe(403);
+    });
+  });
+
+  // 14. Reservation guarantees
+  describe('Reservation guarantees', () => {
+    const body = (extra: object) => ({
+      customerName: 'Guard Tester',
+      customerEmail: 'guard@example.com',
+      customerPhone: '+91 98765 33333',
+      guestCount: 2,
+      ...extra,
+    });
+
+    it('rejects past, impossible and malformed dates', async () => {
+      for (const reservationDate of ['2020-01-01', '2030-02-31', '20-1-1']) {
+        const res = await request(app).post('/api/v1/reservations').send(body({ reservationDate, reservationTime: '19:00' }));
+        expect(res.status).toBe(400);
+      }
+    });
+
+    it('rejects a table too small for the party', async () => {
+      const small = await prisma.restaurantTable.findUnique({ where: { tableNumber: 'T-01' } });
+      const res = await request(app)
+        .post('/api/v1/reservations')
+        .send(body({ guestCount: 8, reservationDate: guardDate, reservationTime: '13:00', tableId: small!.id }));
+      expect(res.status).toBe(400);
+    });
+
+    it('the database itself rejects a second active reservation for the same table and slot', async () => {
+      const table = await prisma.restaurantTable.findUnique({ where: { tableNumber: 'T-02' } });
+      const row = (n: string, status: ReservationStatus) => ({
+        reservationNumber: `RES-GUARD-${n}-${Date.now()}`,
+        customerName: 'Guard',
+        customerEmail: 'guard@example.com',
+        customerPhone: '+91 98765 33333',
+        guestCount: 2,
+        reservationDate: guardDate,
+        reservationTime: '20:00',
+        tableId: table!.id,
+        status,
+      });
+
+      // Bypasses the API on purpose: this proves the constraint, not the application check
+      await prisma.reservation.create({ data: row('A', ReservationStatus.CONFIRMED) });
+      await expect(prisma.reservation.create({ data: row('B', ReservationStatus.PENDING) })).rejects.toMatchObject({ code: 'P2002' });
+
+      // Cancelled history does not occupy the slot
+      await prisma.reservation.create({ data: row('C', ReservationStatus.CANCELLED) });
+    });
+
+    it('a cancelled reservation cannot be revived into a slot that has been rebooked', async () => {
+      const table = await prisma.restaurantTable.findUnique({ where: { tableNumber: 'T-03' } });
+      const first = await request(app)
+        .post('/api/v1/reservations')
+        .send(body({ reservationDate: guardDate, reservationTime: '21:00', tableId: table!.id }));
+      const staff = { Authorization: `Bearer ${adminToken}` };
+      await request(app).patch(`/api/v1/reservations/${first.body.data.reservation.id}/status`).set(staff).send({ status: 'CANCELLED' });
+      const second = await request(app)
+        .post('/api/v1/reservations')
+        .send(body({ reservationDate: guardDate, reservationTime: '21:00', tableId: table!.id }));
+      expect(second.status).toBe(201);
+
+      const revive = await request(app)
+        .patch(`/api/v1/reservations/${first.body.data.reservation.id}/status`)
+        .set(staff)
+        .send({ status: 'CONFIRMED' });
+      expect(revive.status).toBe(400);
+    });
+
+    it('concurrent auto-allocated bookings never share a table', async () => {
+      // Only T-05 seats 8, so exactly one of these can succeed
+      const results = await Promise.all(
+        Array.from({ length: 5 }, () =>
+          request(app).post('/api/v1/reservations').send(body({ guestCount: 8, reservationDate: autoAllocateDate, reservationTime: '19:00' }))
+        )
+      );
+      expect(results.map((r) => r.status).sort()).toEqual([201, 409, 409, 409, 409]);
+    });
+
+    it('customers can cancel their own reservation but not someone else\'s', async () => {
+      const created = await request(app)
+        .post('/api/v1/reservations')
+        .set('Authorization', `Bearer ${customerToken}`)
+        .send(body({ reservationDate: customerCancelDate, reservationTime: '19:00' }));
+      expect(created.status).toBe(201);
+      const id = created.body.data.reservation.id;
+
+      const otherReg = await request(app).post('/api/v1/auth/register').send({
+        name: 'Other Booker',
+        email: `other_booker_${Date.now()}@example.com`,
+        password: 'Password@123',
+      });
+      const denied = await request(app)
+        .patch(`/api/v1/reservations/${id}/cancel`)
+        .set('Authorization', `Bearer ${tokenFromResponse(otherReg)}`);
+      expect(denied.status).toBe(403);
+
+      const own = await request(app)
+        .patch(`/api/v1/reservations/${id}/cancel`)
+        .set('Authorization', `Bearer ${customerToken}`);
+      expect(own.status).toBe(200);
+      expect(own.body.data.reservation.status).toBe('CANCELLED');
+
+      const history = await request(app).get('/api/v1/reservations/my').set('Authorization', `Bearer ${customerToken}`);
+      expect(history.body.data.reservations.some((r: any) => r.id === id)).toBe(true);
     });
   });
 });

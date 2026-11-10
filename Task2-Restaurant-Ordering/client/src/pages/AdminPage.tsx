@@ -67,6 +67,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigate }) => {
 
   // Loading
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Form states for creating/editing menu item
   const [formData, setFormData] = useState({
@@ -83,6 +84,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigate }) => {
 
   async function loadData() {
     setLoading(true);
+    setLoadError(null);
     try {
       const [statsData, menuData, catsData, ordersData, resData, tablesData, usersData] =
         await Promise.all([
@@ -102,16 +104,18 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigate }) => {
       setReservations(resData);
       setTables(tablesData);
       setUsersList(usersData);
-    } catch (err) {
-      console.error('Failed to load admin data:', err);
+    } catch (err: any) {
+      setLoadError(err.message || 'Failed to load admin data.');
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    loadData();
-  }, []);
+    if (user?.role === 'ADMIN') {
+      loadData();
+    }
+  }, [user]);
 
   // Menu Handlers
   const handleToggleAvailability = async (item: MenuItem) => {
@@ -203,6 +207,24 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigate }) => {
     }
   };
 
+  const handleToggleTable = async (table: RestaurantTable) => {
+    try {
+      const updated = await api.updateTable(table.id, { isActive: !table.isActive });
+      setTables((prev) => prev.map((t) => (t.id === table.id ? { ...t, isActive: updated.isActive } : t)));
+    } catch (err: any) {
+      alert(err.message || 'Failed to update table');
+    }
+  };
+
+  const handleReservationStatus = async (id: string, status: 'CONFIRMED' | 'COMPLETED' | 'CANCELLED') => {
+    try {
+      await api.updateReservationStatus(id, status);
+      setReservations((prev) => prev.map((r) => (r.id === id ? { ...r, status } : r)));
+    } catch (err: any) {
+      alert(err.message || 'Failed to update reservation');
+    }
+  };
+
   // Role Management Handler
   const handleUpdateRole = async (userId: string, newRole: Role) => {
     try {
@@ -259,6 +281,10 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigate }) => {
           Refresh Ledger
         </button>
       </div>
+
+      {loadError && (
+        <p className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs">{loadError}</p>
+      )}
 
       {/* Navigation Tabs */}
       <div className="flex items-center space-x-2 overflow-x-auto pb-2 scrollbar-none border-b border-cream-200">
@@ -543,6 +569,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigate }) => {
                     <th className="p-4">Guests</th>
                     <th className="p-4">Table</th>
                     <th className="p-4">Status</th>
+                    <th className="p-4">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-cream-100">
@@ -572,6 +599,23 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigate }) => {
                         >
                           {r.status}
                         </span>
+                      </td>
+                      <td className="p-4 space-x-2 whitespace-nowrap">
+                        {r.status === 'PENDING' && (
+                          <button onClick={() => handleReservationStatus(r.id, 'CONFIRMED')} className="font-bold text-emerald-700 hover:underline">
+                            Confirm
+                          </button>
+                        )}
+                        {r.status === 'CONFIRMED' && (
+                          <button onClick={() => handleReservationStatus(r.id, 'COMPLETED')} className="font-bold text-emerald-700 hover:underline">
+                            Complete
+                          </button>
+                        )}
+                        {(r.status === 'PENDING' || r.status === 'CONFIRMED') && (
+                          <button onClick={() => handleReservationStatus(r.id, 'CANCELLED')} className="font-bold text-red-600 hover:underline">
+                            Cancel
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -652,9 +696,15 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigate }) => {
                 </span>
                 <p className="text-xs text-stone-600 font-semibold">{tbl.capacity} Seats</p>
                 <p className="text-[10px] text-stone-400 line-clamp-1">{tbl.locationDescription || 'Dining Area'}</p>
-                <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
-                  Active
-                </span>
+                <button
+                  onClick={() => handleToggleTable(tbl)}
+                  title={tbl.isActive ? 'Click to deactivate' : 'Click to activate'}
+                  className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                    tbl.isActive ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-600'
+                  }`}
+                >
+                  {tbl.isActive ? 'Active' : 'Inactive'}
+                </button>
               </div>
             ))}
           </div>
@@ -706,6 +756,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigate }) => {
                       <td className="p-4">
                         <select
                           value={u.role}
+                          disabled={u.id === user.id}
+                          title={u.id === user.id ? 'You cannot change your own role' : undefined}
                           onChange={(e) => handleUpdateRole(u.id, e.target.value as Role)}
                           className="px-2 py-1 rounded border border-cream-300 text-xs font-semibold"
                         >
@@ -725,7 +777,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigate }) => {
 
       {/* Item Modal (Create or Edit) */}
       {isItemModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-charcoal-950/60 backdrop-blur-sm animate-in fade-in duration-200">
+        // !mt-0: the parent's space-y-8 would otherwise push this overlay 32px down the viewport
+        <div className="fixed inset-0 !mt-0 z-50 flex items-center justify-center p-4 bg-charcoal-950/60 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-cream-200 space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-cream-100">
               <h3 className="font-display text-lg font-bold text-charcoal-900">
@@ -812,7 +865,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigate }) => {
               <div>
                 <label className="block font-bold text-stone-600 uppercase mb-1">Image URL *</label>
                 <input
-                  type="url"
+                  type="text"
                   required
                   value={formData.imageUrl}
                   onChange={(e) => setFormData({ ...formData, imageUrl: e.target.value })}

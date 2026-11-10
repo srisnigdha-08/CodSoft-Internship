@@ -26,7 +26,8 @@ export const QuickViewModal: React.FC<QuickViewModalProps> = ({ item, onClose })
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-charcoal-950/60 backdrop-blur-sm animate-in fade-in duration-200">
+    // !mt-0: the parent's space-y-8 would otherwise push this overlay 32px down the viewport
+    <div className="fixed inset-0 !mt-0 z-50 flex items-center justify-center p-4 bg-charcoal-950/60 backdrop-blur-sm animate-in fade-in duration-200">
       <div
         className="relative bg-white rounded-3xl max-w-xl w-full overflow-hidden shadow-2xl border border-cream-200 animate-in zoom-in-95 duration-200"
         onClick={(e) => e.stopPropagation()}

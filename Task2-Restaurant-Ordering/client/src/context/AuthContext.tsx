@@ -45,11 +45,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const logout = async () => {
-    await api.logout();
-    setUser(null);
+    try {
+      await api.logout();
+    } finally {
+      setUser(null);
+    }
   };
 
+  // Demo shortcut for local evaluation. The credentials are stripped from production bundles.
   const quickLogin = async (role: Role) => {
+    if (!import.meta.env.DEV) {
+      throw new Error('Demo sign-in is only available in development.');
+    }
+
     let email = 'customer@dinedesk.local';
     let password = 'Customer@12345';
 

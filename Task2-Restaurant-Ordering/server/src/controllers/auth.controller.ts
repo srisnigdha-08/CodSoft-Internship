@@ -66,7 +66,8 @@ export async function register(req: Request, res: Response, next: NextFunction) 
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
-    return sendCreated(res, { user, token }, 'Registration successful');
+    // The JWT is delivered only through the HttpOnly cookie, never in the response body
+    return sendCreated(res, { user }, 'Registration successful');
   } catch (err) {
     next(err);
   }
@@ -112,7 +113,7 @@ export async function login(req: Request, res: Response, next: NextFunction) {
       createdAt: user.createdAt,
     };
 
-    return sendSuccess(res, { user: userProfile, token }, 'Login successful');
+    return sendSuccess(res, { user: userProfile }, 'Login successful');
   } catch (err) {
     next(err);
   }

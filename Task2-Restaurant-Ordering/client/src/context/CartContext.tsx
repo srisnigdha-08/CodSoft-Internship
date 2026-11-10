@@ -18,6 +18,8 @@ interface CartContextType {
   setSelectedTableId: (tableId: string | null) => void;
 }
 
+export const MAX_ITEM_QUANTITY = 50;
+
 const CartContext = createContext<CartContextType | undefined>(undefined);
 
 export const CartProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -45,14 +47,19 @@ export const CartProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!item.isAvailable) return;
 
     setItems((prev) => {
-      const existingIndex = prev.findIndex((ci) => ci.menuItem.id === item.id);
-      if (existingIndex > -1) {
-        const updated = [...prev];
-        updated[existingIndex].quantity += quantity;
-        if (notes) updated[existingIndex].notes = notes;
-        return updated;
+      const existing = prev.find((ci) => ci.menuItem.id === item.id);
+      if (existing) {
+        return prev.map((ci) =>
+          ci.menuItem.id === item.id
+            ? {
+                ...ci,
+                quantity: Math.min(ci.quantity + quantity, MAX_ITEM_QUANTITY),
+                notes: notes || ci.notes,
+              }
+            : ci
+        );
       }
-      return [...prev, { menuItem: item, quantity, notes }];
+      return [...prev, { menuItem: item, quantity: Math.min(quantity, MAX_ITEM_QUANTITY), notes }];
     });
   };
 
@@ -67,7 +74,7 @@ export const CartProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     setItems((prev) =>
       prev.map((ci) =>
-        ci.menuItem.id === itemId ? { ...ci, quantity } : ci
+        ci.menuItem.id === itemId ? { ...ci, quantity: Math.min(quantity, MAX_ITEM_QUANTITY) } : ci
       )
     );
   };

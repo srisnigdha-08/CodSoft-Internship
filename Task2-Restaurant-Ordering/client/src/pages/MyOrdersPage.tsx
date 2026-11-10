@@ -21,21 +21,44 @@ export const MyOrdersPage: React.FC<MyOrdersPageProps> = ({ onNavigate }) => {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'ALL' | 'ACTIVE' | 'COMPLETED'>('ALL');
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     async function loadOrders() {
+      if (!user) {
+        setOrders([]);
+        setLoading(false);
+        return;
+      }
       setLoading(true);
+      setLoadError(null);
       try {
-        const list = await api.getMyOrders(user?.email || undefined);
+        const list = await api.getMyOrders();
         setOrders(list);
-      } catch (err) {
-        console.error('Failed to load orders', err);
+      } catch (err: any) {
+        setLoadError(err.message || 'Failed to load your orders.');
       } finally {
         setLoading(false);
       }
     }
     loadOrders();
   }, [user]);
+
+  if (!user) {
+    return (
+      <div className="max-w-md mx-auto py-20 px-4 text-center space-y-4">
+        <ShoppingBag className="w-12 h-12 text-stone-400 mx-auto" />
+        <h2 className="font-display text-2xl font-bold">Sign In to See Your Orders</h2>
+        <p className="text-xs text-stone-500">Order history is available for signed-in customers.</p>
+        <button
+          onClick={() => onNavigate('login')}
+          className="px-5 py-2.5 rounded-full bg-terracotta-700 text-white text-xs font-bold"
+        >
+          Sign In
+        </button>
+      </div>
+    );
+  }
 
   const filteredOrders = orders.filter((o) => {
     if (filter === 'ACTIVE') {
@@ -88,6 +111,10 @@ export const MyOrdersPage: React.FC<MyOrdersPageProps> = ({ onNavigate }) => {
           </button>
         </div>
       </div>
+
+      {loadError && (
+        <p className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs">{loadError}</p>
+      )}
 
       {loading ? (
         <div className="space-y-4">
@@ -168,7 +195,7 @@ export const MyOrdersPage: React.FC<MyOrdersPageProps> = ({ onNavigate }) => {
                 {/* Right side: Amount and View Button */}
                 <div className="flex items-center justify-between md:justify-end space-x-6 pt-3 md:pt-0 border-t md:border-t-0 border-cream-100">
                   <div className="text-left md:text-right">
-                    <span className="text-[10px] text-stone-500 uppercase font-medium block">Total Paid</span>
+                    <span className="text-[10px] text-stone-500 uppercase font-medium block">Total</span>
                     <span className="font-display text-lg font-bold text-charcoal-900">
                       ₹{Number(order.totalAmount).toFixed(2)}
                     </span>
@@ -181,7 +208,7 @@ export const MyOrdersPage: React.FC<MyOrdersPageProps> = ({ onNavigate }) => {
                     }}
                     className="px-4 py-2 rounded-full bg-cream-100 group-hover:bg-terracotta-700 text-charcoal-900 group-hover:text-white text-xs font-bold transition-all flex items-center space-x-1"
                   >
-                    <span>Track Live</span>
+                    <span>Track Order</span>
                     <ChevronRight className="w-3.5 h-3.5" />
                   </button>
                 </div>

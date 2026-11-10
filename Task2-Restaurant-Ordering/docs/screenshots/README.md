@@ -1,30 +1,22 @@
-# DineDesk — Application Screenshots Guide
+# DineDesk — Application Screenshots
 
-This guide catalogs the recommended application screens and user journeys to capture for the CodSoft Internship Task 2 submission and project showcase.
+Genuine screenshots of the running application, captured on 2026-11-10 at 1440px width from the Vite development server. They use a freshly seeded demo database and fictional data only.
 
----
+The one-click demo sign-in controls visible in the header appear only in development builds. Payments shown are simulated.
 
-## Screenshot Checklist
-
-| Screen / Feature | Description | URL / Route |
+| File | Screen | How to reach it |
 |---|---|---|
-| **1. Customer Home Page** | Hero section with quick links to digital menu, table reservation, and featured chef specials. | `/` |
-| **2. Interactive Digital Menu** | Category tabs (Starters, Main Course, Desserts, Beverages), real-time search, and Vegetarian toggle. | `/menu` |
-| **3. Dish Quick View Modal** | Detailed nutritional info, allergens, spice level, and Add-to-Cart controls. | `/menu` |
-| **4. Shopping Cart & Dining Mode** | Cart items with quantity adjustments, subtotal, and dining mode selection (Dine-In, Takeaway, Delivery). | `/cart` |
-| **5. Order Checkout & Payment** | Customer contact form, delivery address, payment method selection, and order breakdown. | `/checkout` |
-| **6. Live Order Tracker** | Multi-step progress timeline (`PENDING` → `CONFIRMED` → `PREPARING` → `READY` → `COMPLETED`) with order details. | `/orders/:id` |
-| **7. Table Reservation Form** | Date picker, dining time slot selection, party size, and special seating requests. | `/reserve` |
-| **8. Kitchen Display System (KDS)** | Operational view showing incoming orders organized by status with one-click status advancement. | `/kitchen` |
-| **9. Admin Dashboard & Metrics** | Real-time KPIs (total revenue, active orders, customer count) and catalog management tables. | `/admin` |
-| **10. Admin Menu Editor** | Modal for adding/editing dishes, updating prices, and toggling dish availability. | `/admin` |
-| **11. Test Suite Pass Verification** | Terminal view showing all 21 automated integration tests passing in Vitest. | Terminal (`npm run test`) |
+| [`01-login.png`](01-login.png) | Sign-in page | Header → Sign In |
+| [`02-customer-menu.png`](02-customer-menu.png) | Customer menu with search, vegetarian toggle, categories and dishes | Digital Menu, signed in as customer |
+| [`03-menu-item-details.png`](03-menu-item-details.png) | Dish details with kitchen notes, quantity and Add to Cart | Digital Menu → dish image |
+| [`04-cart.png`](04-cart.png) | Cart with items, quantities, prices, bill summary and dining options | Header cart icon |
+| [`05-checkout.png`](05-checkout.png) | Delivery checkout with address, simulated payment options and order summary | Cart → Proceed to Checkout |
+| [`06-order-tracking.png`](06-order-tracking.png) | Order tracker showing a test order in `PREPARING` | After checkout, or My Orders |
+| [`07-table-reservation.png`](07-table-reservation.png) | Reservation form with date, party size, time slots and table preference | Reservations |
+| [`08-kitchen-display.png`](08-kitchen-display.png) | Kitchen Display with incoming, in-preparation and ready orders | Kitchen KDS, signed in as kitchen staff |
+| [`09-admin-dashboard.png`](09-admin-dashboard.png) | Admin metrics and top-selling dishes | Admin, signed in as administrator |
+| [`10-admin-management.png`](10-admin-management.png) | Admin orders ledger with payment and order statuses | Admin → Orders |
 
----
+## Not Captured
 
-## Capture Guidelines
-
-- **Resolution:** Capture at 1080p (1920x1080) for sharp, professional visual clarity.
-- **Demo Data:** Use the pre-seeded demo dishes and demo users (`admin@dinedesk.local`, `kitchen@dinedesk.local`, `customer@dinedesk.local`).
-- **Privacy:** Ensure no personal passwords or local system paths are visible in the captured images.
-- **Dual-Window Tip:** An impactful screenshot can be created by splitting the screen between the **Customer Order Tracker** on one side and the **Kitchen KDS** on the other to showcase real-time operational synchronization.
+The home page and a terminal view of the test suite were listed in an earlier checklist but are not part of this set.

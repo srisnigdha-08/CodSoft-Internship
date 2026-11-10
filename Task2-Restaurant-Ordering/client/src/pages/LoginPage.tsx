@@ -64,8 +64,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onNavigate }) => {
         </p>
       </div>
 
-      {/* Quick Demo Login Card */}
-      <div className="bg-cream-200/60 rounded-3xl p-5 border border-cream-300/80 space-y-3">
+      {/* Quick Demo Login Card (development only) */}
+      {import.meta.env.DEV && <div className="bg-cream-200/60 rounded-3xl p-5 border border-cream-300/80 space-y-3">
         <div className="flex items-center space-x-1.5 text-xs font-bold text-charcoal-900">
           <Sparkles className="w-4 h-4 text-amber-600" />
           <span>One-Click Evaluator Sign-In:</span>
@@ -93,7 +93,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onNavigate }) => {
             Admin
           </button>
         </div>
-      </div>
+      </div>}
 
       {/* Credentials Form */}
       <div className="bg-white rounded-3xl p-8 border border-cream-200 shadow-md space-y-5">

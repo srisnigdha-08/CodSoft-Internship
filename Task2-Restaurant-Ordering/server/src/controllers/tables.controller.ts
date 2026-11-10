@@ -3,10 +3,11 @@ import { z } from 'zod';
 import prisma from '../prisma';
 import { NotFoundError, BadRequestError } from '../utils/errors';
 import { sendCreated, sendSuccess } from '../utils/response';
+import { localDateString } from '../utils/date';
 
 const tableSchema = z.object({
   tableNumber: z.string().min(1, 'Table number is required'),
-  capacity: z.number().int().min(1, 'Capacity must be at least 1'),
+  capacity: z.number().int().min(1, 'Capacity must be at least 1').max(50, 'Capacity cannot exceed 50'),
   locationDescription: z.string().optional().nullable(),
   isActive: z.boolean().default(true),
 });
@@ -74,6 +75,18 @@ export async function deleteTable(req: Request, res: Response, next: NextFunctio
 
     if (activeOrders > 0) {
       throw new BadRequestError('Cannot delete table with active dining orders.');
+    }
+
+    const upcomingReservations = await prisma.reservation.count({
+      where: {
+        tableId: id,
+        status: { in: ['PENDING', 'CONFIRMED'] },
+        reservationDate: { gte: localDateString() },
+      },
+    });
+
+    if (upcomingReservations > 0) {
+      throw new BadRequestError('Cannot delete a table with upcoming reservations.');
     }
 
     await prisma.restaurantTable.delete({

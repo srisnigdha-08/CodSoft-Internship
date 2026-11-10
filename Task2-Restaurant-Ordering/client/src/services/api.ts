@@ -12,6 +12,13 @@ import {
 
 const API_BASE = '/api/v1';
 
+// Authentication uses the HttpOnly cookie only. Remove any token left by earlier versions.
+try {
+  localStorage.removeItem('dinedesk_token');
+} catch {
+  // storage unavailable: nothing to clean up
+}
+
 async function request<T>(
   endpoint: string,
   options: RequestInit = {}
@@ -21,21 +28,24 @@ async function request<T>(
     headers.set('Content-Type', 'application/json');
   }
 
-  const token = localStorage.getItem('dinedesk_token');
-  if (token && !headers.has('Authorization')) {
-    headers.set('Authorization', `Bearer ${token}`);
-  }
-
   const res = await fetch(`${API_BASE}${endpoint}`, {
     ...options,
     headers,
     credentials: 'include',
   });
 
-  const body = await res.json();
+  let body: any;
+  try {
+    body = await res.json();
+  } catch {
+    const err: any = new Error('The server is unavailable. Please try again shortly.');
+    err.status = res.status;
+    throw err;
+  }
 
   if (!res.ok) {
-    const errorMsg = body.message || 'Request failed';
+    // Show the specific field problem from the API's validation response when there is one
+    const errorMsg = body.errors?.[0]?.message || body.message || 'Request failed';
     const err: any = new Error(errorMsg);
     err.status = res.status;
     err.details = body.details;
@@ -49,29 +59,22 @@ async function request<T>(
 export const api = {
   // Auth
   async register(data: any) {
-    const res = await request<{ user: User; token: string }>('/auth/register', {
+    const res = await request<{ user: User }>('/auth/register', {
       method: 'POST',
       body: JSON.stringify(data),
     });
-    if (res.data?.token) {
-      localStorage.setItem('dinedesk_token', res.data.token);
-    }
     return res.data;
   },
 
   async login(data: any) {
-    const res = await request<{ user: User; token: string }>('/auth/login', {
+    const res = await request<{ user: User }>('/auth/login', {
       method: 'POST',
       body: JSON.stringify(data),
     });
-    if (res.data?.token) {
-      localStorage.setItem('dinedesk_token', res.data.token);
-    }
     return res.data;
   },
 
   async logout() {
-    localStorage.removeItem('dinedesk_token');
     return request('/auth/logout', { method: 'POST' });
   },
 
@@ -136,9 +139,8 @@ export const api = {
     return res.data.order;
   },
 
-  async getMyOrders(email?: string) {
-    const query = email ? `?email=${encodeURIComponent(email)}` : '';
-    const res = await request<{ orders: Order[] }>(`/orders/my${query}`);
+  async getMyOrders() {
+    const res = await request<{ orders: Order[] }>('/orders/my');
     return res.data.orders;
   },
 
@@ -193,10 +195,16 @@ export const api = {
     return res.data.reservation;
   },
 
-  async getMyReservations(email?: string) {
-    const query = email ? `?email=${encodeURIComponent(email)}` : '';
-    const res = await request<{ reservations: Reservation[] }>(`/reservations/my${query}`);
+  async getMyReservations() {
+    const res = await request<{ reservations: Reservation[] }>('/reservations/my');
     return res.data.reservations;
+  },
+
+  async cancelMyReservation(id: string) {
+    const res = await request<{ reservation: Reservation }>(`/reservations/${id}/cancel`, {
+      method: 'PATCH',
+    });
+    return res.data.reservation;
   },
 
   async getAllReservations(params: { date?: string; status?: string } = {}) {

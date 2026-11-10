@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useCart } from '../context/CartContext';
+import { useCart, MAX_ITEM_QUANTITY } from '../context/CartContext';
 import { api } from '../services/api';
 import { RestaurantTable, OrderType } from '../types';
 import {
@@ -42,9 +42,10 @@ export const CartPage: React.FC<CartPageProps> = ({ onNavigate }) => {
     async function loadTables() {
       try {
         const tbls = await api.getTables();
-        setTables(tbls.filter((t) => t.isActive));
-        if (tbls.length > 0 && !selectedTableId) {
-          setSelectedTableId(tbls[0].id);
+        const activeTables = tbls.filter((t) => t.isActive);
+        setTables(activeTables);
+        if (activeTables.length > 0 && !selectedTableId) {
+          setSelectedTableId(activeTables[0].id);
         }
       } catch (err) {
         console.error('Failed to load tables', err);
@@ -150,7 +151,8 @@ export const CartPage: React.FC<CartPageProps> = ({ onNavigate }) => {
                       </span>
                       <button
                         onClick={() => updateQuantity(menuItem.id, quantity + 1)}
-                        className="w-7 h-7 rounded-full bg-terracotta-700 hover:bg-terracotta-800 text-white flex items-center justify-center font-bold"
+                        disabled={quantity >= MAX_ITEM_QUANTITY}
+                        className="w-7 h-7 rounded-full bg-terracotta-700 hover:bg-terracotta-800 disabled:bg-stone-300 text-white flex items-center justify-center font-bold"
                         aria-label="Increase"
                       >
                         <Plus className="w-3.5 h-3.5" />
@@ -277,7 +279,7 @@ export const CartPage: React.FC<CartPageProps> = ({ onNavigate }) => {
               </div>
               <div className="flex justify-between text-stone-600">
                 <span className="flex items-center space-x-1">
-                  <span>GST & Service (5%)</span>
+                  <span>GST (5%)</span>
                 </span>
                 <span className="font-semibold text-charcoal-900">₹{tax.toFixed(2)}</span>
               </div>
@@ -291,7 +293,7 @@ export const CartPage: React.FC<CartPageProps> = ({ onNavigate }) => {
               <div className="pt-3 border-t border-cream-200 flex justify-between items-baseline">
                 <div>
                   <span className="font-display text-lg font-bold text-charcoal-900 block">Total Due</span>
-                  <span className="text-[11px] text-stone-500">Inclusive of all restaurant taxes</span>
+                  <span className="text-[11px] text-stone-500">Includes GST and any delivery charge</span>
                 </div>
                 <span className="font-display text-2xl font-bold text-terracotta-700">
                   ₹{total.toFixed(2)}
@@ -308,7 +310,7 @@ export const CartPage: React.FC<CartPageProps> = ({ onNavigate }) => {
             </button>
 
             <div className="pt-2 text-center text-xs text-stone-500">
-              <p>Prices recalculated and verified securely on the server.</p>
+              <p>Final prices are recalculated on the server when you place the order.</p>
             </div>
           </div>
         </div>

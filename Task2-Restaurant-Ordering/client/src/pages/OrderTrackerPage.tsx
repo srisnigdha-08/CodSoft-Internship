@@ -31,7 +31,7 @@ const statusSteps: { key: OrderStatus; label: string; icon: any; description: st
     key: 'CONFIRMED',
     label: 'Confirmed',
     icon: CheckCircle,
-    description: 'Payment verified & assigned',
+    description: 'Order accepted',
   },
   {
     key: 'PREPARING',
@@ -57,6 +57,7 @@ export const OrderTrackerPage: React.FC<OrderTrackerPageProps> = ({ orderId, onN
   const [order, setOrder] = useState<Order | null>(null);
   const [loading, setLoading] = useState(true);
   const [cancelling, setCancelling] = useState(false);
+  const [retryingPayment, setRetryingPayment] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -73,7 +74,7 @@ export const OrderTrackerPage: React.FC<OrderTrackerPageProps> = ({ orderId, onN
     }
   }
 
-  // Initial load and live polling every 4 seconds
+  // Initial load, then status polling every 4 seconds
   useEffect(() => {
     fetchOrderDetails();
     const interval = setInterval(fetchOrderDetails, 4000);
@@ -96,16 +97,30 @@ export const OrderTrackerPage: React.FC<OrderTrackerPageProps> = ({ orderId, onN
     }
   };
 
+  const handleRetryPayment = async () => {
+    if (!order?.payment) return;
+    setRetryingPayment(true);
+    try {
+      await api.processPaymentCheckout({ orderId: order.id, method: order.payment.method });
+      await fetchOrderDetails();
+    } catch (err: any) {
+      alert(err.message || 'Simulated payment failed');
+    } finally {
+      setRetryingPayment(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="max-w-2xl mx-auto py-20 px-4 text-center space-y-4">
         <div className="w-12 h-12 border-4 border-terracotta-700 border-t-transparent rounded-full animate-spin mx-auto" />
-        <p className="text-xs text-stone-500 font-medium">Connecting to DineDesk order pipeline...</p>
+        <p className="text-xs text-stone-500 font-medium">Loading your order...</p>
       </div>
     );
   }
 
-  if (!order || errorMsg) {
+  // A failed background refresh keeps the last known order on screen
+  if (!order) {
     return (
       <div className="max-w-md mx-auto py-20 px-4 text-center space-y-4">
         <AlertCircle className="w-12 h-12 text-red-500 mx-auto" />
@@ -160,10 +175,10 @@ export const OrderTrackerPage: React.FC<OrderTrackerPageProps> = ({ orderId, onN
           </div>
         </div>
 
-        {/* Polling Heartbeat Badge */}
+        {/* Polling Status */}
         <div className="flex items-center space-x-2 text-[11px] text-stone-400 self-end sm:self-center">
-          <RefreshCw className="w-3.5 h-3.5 animate-spin text-terracotta-600" />
-          <span>Live Tracking Active ({lastUpdated.toLocaleTimeString()})</span>
+          <RefreshCw className="w-3.5 h-3.5 text-terracotta-600" />
+          <span>Status refreshes every 4 seconds (last checked {lastUpdated.toLocaleTimeString()})</span>
         </div>
       </div>
 
@@ -179,7 +194,7 @@ export const OrderTrackerPage: React.FC<OrderTrackerPageProps> = ({ orderId, onN
             <div>
               <p className="font-bold text-sm">Order Cancelled</p>
               <p className="text-xs text-red-700 mt-0.5">
-                This order was cancelled. Any online payment has been marked for automated refund.
+                This order was cancelled. Any simulated online payment has been marked as refunded.
               </p>
             </div>
           </div>
@@ -297,7 +312,7 @@ export const OrderTrackerPage: React.FC<OrderTrackerPageProps> = ({ orderId, onN
               <span>₹{Number(order.subtotal).toFixed(2)}</span>
             </div>
             <div className="flex justify-between">
-              <span>GST & Taxes (5%)</span>
+              <span>GST (5%)</span>
               <span>₹{Number(order.tax).toFixed(2)}</span>
             </div>
             <div className="flex justify-between">
@@ -337,7 +352,7 @@ export const OrderTrackerPage: React.FC<OrderTrackerPageProps> = ({ orderId, onN
             )}
 
             <div>
-              <span className="text-stone-400 uppercase font-bold block text-[10px]">Payment Verification</span>
+              <span className="text-stone-400 uppercase font-bold block text-[10px]">{order.payment?.method === 'CASH' ? 'Payment' : 'Payment (Simulated)'}</span>
               <div className="mt-1 flex items-center space-x-2">
                 <span
                   className={`px-2 py-0.5 rounded text-[11px] font-bold ${
@@ -354,6 +369,15 @@ export const OrderTrackerPage: React.FC<OrderTrackerPageProps> = ({ orderId, onN
                   via {order.payment?.method || 'CASH'}
                 </span>
               </div>
+              {order.payment?.status === 'FAILED' && !isCancelled && (
+                <button
+                  onClick={handleRetryPayment}
+                  disabled={retryingPayment}
+                  className="mt-2 px-3 py-1 rounded-full bg-terracotta-700 text-white text-[11px] font-bold disabled:opacity-50"
+                >
+                  {retryingPayment ? 'Retrying...' : 'Retry Simulated Payment'}
+                </button>
+              )}
               {order.payment?.transactionRef && (
                 <p className="font-mono text-[10px] text-stone-400 mt-1">
                   Ref: {order.payment.transactionRef}

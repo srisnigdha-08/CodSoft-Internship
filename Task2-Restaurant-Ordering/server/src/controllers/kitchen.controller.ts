@@ -1,8 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import prisma from '../prisma';
-import { OrderStatus } from '@prisma/client';
-import { BadRequestError, NotFoundError } from '../utils/errors';
+import { OrderStatus, PaymentMethod, PaymentStatus } from '@prisma/client';
+import { BadRequestError, ConflictError, NotFoundError } from '../utils/errors';
 import { sendSuccess } from '../utils/response';
 
 const validTransitions: Record<OrderStatus, OrderStatus[]> = {
@@ -16,16 +16,20 @@ const validTransitions: Record<OrderStatus, OrderStatus[]> = {
 
 const updateStatusSchema = z.object({
   status: z.nativeEnum(OrderStatus),
-  notes: z.string().optional(),
+  notes: z.string().max(500).optional(),
+});
+
+const kitchenQuerySchema = z.object({
+  status: z.nativeEnum(OrderStatus).optional(),
 });
 
 export async function getKitchenOrders(req: Request, res: Response, next: NextFunction) {
   try {
-    const { status } = req.query;
+    const { status } = kitchenQuerySchema.parse(req.query);
 
     const where: any = {};
     if (status) {
-      where.status = status as OrderStatus;
+      where.status = status;
     } else {
       // By default, kitchen sees active orders that require preparation
       where.status = {
@@ -77,6 +81,7 @@ export async function updateOrderStatus(req: Request, res: Response, next: NextF
 
     const order = await prisma.order.findFirst({
       where: { OR: [{ id }, { orderNumber: id }] },
+      include: { payment: true },
     });
 
     if (!order) {
@@ -95,19 +100,47 @@ export async function updateOrderStatus(req: Request, res: Response, next: NextF
     }
 
     const updatedOrder = await prisma.$transaction(async (tx) => {
-      const updated = await tx.order.update({
-        where: { id: order.id },
+      // Conditional update: two staff clicks or a racing customer cancel cannot both succeed
+      const { count } = await tx.order.updateMany({
+        where: { id: order.id, status: currentStatus },
+        data: { status: targetStatus },
+      });
+      if (count === 0) {
+        throw new ConflictError('This order was just updated by someone else. Refresh and try again.');
+      }
+
+      await tx.orderStatusHistory.create({
         data: {
-          status: targetStatus,
-          statusHistory: {
-            create: {
-              previousStatus: currentStatus,
-              newStatus: targetStatus,
-              changedByUserId: req.user?.userId || null,
-              notes: validated.notes || `Order advanced to ${targetStatus} by kitchen staff`,
-            },
-          },
+          orderId: order.id,
+          previousStatus: currentStatus,
+          newStatus: targetStatus,
+          changedByUserId: req.user?.userId || null,
+          notes: validated.notes || `Order advanced to ${targetStatus} by kitchen staff`,
         },
+      });
+
+      if (order.payment) {
+        if (targetStatus === OrderStatus.CANCELLED && order.payment.status === PaymentStatus.SUCCESSFUL) {
+          await tx.payment.update({
+            where: { id: order.payment.id },
+            data: { status: PaymentStatus.REFUNDED },
+          });
+        }
+        // Completing a cash order means the cash was collected at handover
+        if (
+          targetStatus === OrderStatus.COMPLETED &&
+          order.payment.method === PaymentMethod.CASH &&
+          order.payment.status === PaymentStatus.PENDING
+        ) {
+          await tx.payment.update({
+            where: { id: order.payment.id },
+            data: { status: PaymentStatus.SUCCESSFUL },
+          });
+        }
+      }
+
+      return tx.order.findUniqueOrThrow({
+        where: { id: order.id },
         include: {
           items: true,
           table: true,
@@ -117,8 +150,6 @@ export async function updateOrderStatus(req: Request, res: Response, next: NextF
           },
         },
       });
-
-      return updated;
     });
 
     return sendSuccess(res, { order: updatedOrder }, `Order status updated to ${targetStatus}`);

@@ -10,7 +10,7 @@ import { authenticate, optionalAuth } from '../middleware/auth';
 const router = Router();
 
 router.post('/', optionalAuth, createOrder);
-router.get('/my', optionalAuth, getMyOrders);
+router.get('/my', authenticate, getMyOrders);
 router.get('/:id', optionalAuth, getOrderById);
 router.patch('/:id/cancel', optionalAuth, cancelOrder);
 

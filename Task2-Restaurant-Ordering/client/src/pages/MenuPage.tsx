@@ -58,7 +58,7 @@ export const MenuPage: React.FC<MenuPageProps> = ({ initialCategory, onNavigate 
           Curated Dining Selections
         </h1>
         <p className="text-sm text-stone-600 leading-relaxed">
-          Every dish is prepared fresh to order. Customize items with special kitchen notes, review allergen indicators, and order directly to your table or doorstep.
+          Every dish is prepared fresh to order. Add special kitchen notes and order directly to your table or doorstep.
         </p>
       </div>
 
@@ -79,10 +79,12 @@ export const MenuPage: React.FC<MenuPageProps> = ({ initialCategory, onNavigate 
 
           {/* Pure Veg Filter Toggle */}
           <div className="flex items-center space-x-3 w-full sm:w-auto justify-end">
-            <label className="flex items-center space-x-2 cursor-pointer select-none">
+            <label
+              onClick={() => setVegOnly(!vegOnly)}
+              className="flex items-center space-x-2 cursor-pointer select-none"
+            >
               <span className="text-xs font-bold text-stone-700">Vegetarian Only</span>
               <div
-                onClick={() => setVegOnly(!vegOnly)}
                 className={`w-11 h-6 flex items-center rounded-full p-1 transition-colors duration-200 ease-in-out ${
                   vegOnly ? 'bg-emerald-600' : 'bg-stone-300'
                 }`}
