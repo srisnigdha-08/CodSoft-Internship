@@ -2,9 +2,10 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    include: ["tests/integration.pg.ts"],
+    include: ["tests/**/*.test.ts"],
     testTimeout: 20_000,
     hookTimeout: 30_000,
-    maxWorkers: 1,
+    // Every test file shares the one dedicated test database.
+    fileParallelism: false,
   },
 });

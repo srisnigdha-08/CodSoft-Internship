@@ -35,13 +35,13 @@ describe('LoginForm', () => {
 
   it('passes the authenticated user to the app after a successful login', async () => {
     const onLogin = vi.fn()
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: { user: { id: 8, email: 'admin@school.local', role: 'admin' } } }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: { user: { id: '8', email: 'admin@school.local', role: 'admin' } } }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
     render(<LoginForm onLogin={onLogin} />)
 
     await userEvent.type(screen.getByLabelText('School email'), ' ADMIN@SCHOOL.LOCAL ')
     await userEvent.type(screen.getByLabelText('Password'), 'Admin@12345')
     fireEvent.click(screen.getByRole('button', { name: /sign in/i }))
 
-    await waitFor(() => expect(onLogin).toHaveBeenCalledWith({ id: 8, email: 'admin@school.local', role: 'admin' }))
+    await waitFor(() => expect(onLogin).toHaveBeenCalledWith({ id: '8', email: 'admin@school.local', role: 'admin' }))
   })
 })

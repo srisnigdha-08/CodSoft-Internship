@@ -106,7 +106,7 @@ export function StudentsPage({ user }: { user: User }) {
 }
 
 function StudentForm({ student, classes, onClose, onSaved }: { student?: Student; classes: SchoolClass[]; onClose: () => void; onSaved: (student: Student) => void }) {
-  const [draft, setDraft] = useState<StudentDraft>(student ? { email: student.email, password: '', firstName: student.firstName, lastName: student.lastName, studentNumber: student.studentNumber, classId: student.classId ? String(student.classId) : '', dateOfBirth: student.dateOfBirth ?? '', phone: student.phone ?? '', address: student.address ?? '' } : emptyDraft)
+  const [draft, setDraft] = useState<StudentDraft>(student ? { email: student.email, password: '', firstName: student.firstName, lastName: student.lastName, studentNumber: student.studentNumber, classId: student.classId ?? '', dateOfBirth: student.dateOfBirth ?? '', phone: student.phone ?? '', address: student.address ?? '' } : emptyDraft)
   const [error, setError] = useState('')
   const [pending, setPending] = useState(false)
   const editing = Boolean(student)

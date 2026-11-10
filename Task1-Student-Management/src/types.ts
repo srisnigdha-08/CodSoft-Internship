@@ -2,20 +2,20 @@ export type Role = 'admin' | 'teacher' | 'student'
 export type Section = 'dashboard' | 'students' | 'teachers' | 'classes' | 'attendance' | 'academics' | 'fees'
 
 export interface User {
-  id: number
+  id: string
   email: string
   role: Role
-  studentId?: number
-  teacherId?: number
+  studentId?: string
+  teacherId?: string
 }
 
 export interface Student {
-  id: number
+  id: string
   email: string
   firstName: string
   lastName: string
   studentNumber: string
-  classId: number | null
+  classId: string | null
   className: string | null
   section: string | null
   dateOfBirth: string | null
@@ -26,7 +26,7 @@ export interface Student {
 }
 
 export interface Teacher {
-  id: number
+  id: string
   email: string
   firstName: string
   lastName: string
@@ -37,20 +37,20 @@ export interface Teacher {
 }
 
 export interface SchoolClass {
-  id: number
+  id: string
   name: string
   section: string
-  teacherId: number | null
+  teacherId: string | null
   teacherName: string | null
   studentCount: number
 }
 
 export interface AttendanceRecord {
-  id: number
-  studentId: number
+  id: string
+  studentId: string
   studentName: string
   studentNumber: string
-  classId: number
+  classId: string
   className: string
   section: string
   date: string
@@ -58,18 +58,18 @@ export interface AttendanceRecord {
 }
 
 export interface AttendanceCorrection {
-  id: number
-  attendanceId: number
+  id: string
+  attendanceId: string
   previousStatus: AttendanceRecord['status']
   newStatus: AttendanceRecord['status']
-  correctedBy: number
+  correctedBy: string
   correctedAt: string
 }
 
 export interface Examination {
-  id: number
+  id: string
   title: string
-  classId: number
+  classId: string
   className: string
   section: string
   date: string
@@ -77,11 +77,11 @@ export interface Examination {
 }
 
 export interface AcademicResult {
-  id: number
-  studentId: number
+  id: string
+  studentId: string
   studentName: string
   studentNumber: string
-  examinationId: number
+  examinationId: string
   examination: string
   className: string
   date: string
@@ -90,8 +90,8 @@ export interface AcademicResult {
 }
 
 export interface FeeRecord {
-  id: number
-  studentId: number
+  id: string
+  studentId: string
   studentName: string
   studentNumber: string
   description: string
@@ -109,7 +109,7 @@ export interface DashboardStats {
     totalTeachers: number | null
     attendance: { present: number; absent: number; late: number; total: number; percentage: number }
   }
-  recentStudents: Array<{ id: number; name: string; studentNumber: string; className: string | null; registeredAt: string }>
+  recentStudents: Array<{ id: string; name: string; studentNumber: string; className: string | null; registeredAt: string }>
   attendanceTrend: Array<{ date: string; present: number; absent: number; late: number; total: number; percentage: number }>
   academics: { resultCount: number; averagePercentage: number; gradeBands: { strong: number; steady: number; support: number } }
   fees: { obligations: number; collected: number; outstanding: number } | null

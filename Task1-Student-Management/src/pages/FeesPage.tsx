@@ -36,7 +36,7 @@ export function FeesPage({ user }: { user: User }) {
   async function createFee(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setSaving(true); setError(''); setNotice('')
     try {
-      await apiRequest('/fees', { method: 'POST', body: JSON.stringify({ ...draft, studentId: Number(draft.studentId), amount: Number(draft.amount) }) })
+      await apiRequest('/fees', { method: 'POST', body: JSON.stringify({ ...draft, amount: Number(draft.amount) }) })
       setAdding(false); setDraft({ studentId: '', description: '', academicYear: '2026-27', amount: '', dueDate: '' }); setNotice('Fee obligation created.'); setRefresh((value) => value + 1)
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not create this fee record.') }
     finally { setSaving(false) }

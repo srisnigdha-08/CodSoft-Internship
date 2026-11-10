@@ -11,11 +11,11 @@ it('loads every active student page for management forms', async () => {
     return {
       ok: true,
       status: 200,
-      json: async () => ({ data: [{ id: page }], meta: { pages: 3 } }),
+      json: async () => ({ data: [{ id: String(page) }], meta: { pages: 3 } }),
     } as Response
   }))
 
   const students = await loadActiveStudents()
-  expect(students.map((student) => student.id)).toEqual([1, 2, 3])
+  expect(students.map((student) => student.id)).toEqual(['1', '2', '3'])
   expect(requestedPages.sort()).toEqual([1, 2, 3])
 })

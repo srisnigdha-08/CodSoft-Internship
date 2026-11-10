@@ -1,128 +1,151 @@
 import { randomUUID } from "node:crypto";
 import { Router } from "express";
-import type { Pool } from "pg";
-import { requireAuth, requireRole } from "../auth.js";
-import { inTransaction } from "../database.js";
-import { ApiError, assert, requireAmount, requireDate, requirePositiveId, requireString } from "../errors.js";
+import type { Types } from "mongoose";
+import { currentStudentId, currentUserId, requireAuth, requireRole } from "../auth.js";
+import { dateFromDay, dayFromDate } from "../dates.js";
+import { ApiError, assert, conflictOnDuplicate, fromCents, isDuplicateKey, requireAmount, requireDate, requireObjectId, requirePositiveInteger, requireString, toCents } from "../errors.js";
+import { Fee, Payment, Student, type FeeDocument } from "../models/index.js";
 
-interface FeeRow {
-  id: string;
-  student_id: string;
-  student_name: string;
-  student_number: string;
-  description: string;
-  academic_year: string;
-  amount: string;
-  due_date: string;
-  amount_paid: string;
-  balance: string;
-  status: "pending" | "partially paid" | "paid";
+const TEACHER_DENIED = "Fee information is limited to administrators and the student concerned.";
+const STUDENT_FIELDS = "firstName lastName studentNumber";
+const PAYMENTS_PER_PAGE = 50;
+
+type FeeStudent = { _id: Types.ObjectId; firstName: string; lastName: string; studentNumber: string };
+type FeeRow = Omit<FeeDocument, "studentId"> & { _id: Types.ObjectId; studentId: FeeStudent };
+
+function feeStatus(paidCents: number, amountCents: number): "pending" | "partially paid" | "paid" {
+  if (paidCents === 0) return "pending";
+  return paidCents < amountCents ? "partially paid" : "paid";
 }
-
-const feeSelect = `SELECT f.id,f.student_id,s.first_name || ' ' || s.last_name AS student_name,
-  s.student_number,f.description,f.academic_year,f.amount,f.due_date::text AS due_date,
-  COALESCE(SUM(p.amount),0)::numeric(10,2)::text AS amount_paid,
-  GREATEST(f.amount-COALESCE(SUM(p.amount),0),0)::numeric(10,2)::text AS balance,
-  CASE WHEN COALESCE(SUM(p.amount),0)=0 THEN 'pending'
-       WHEN COALESCE(SUM(p.amount),0)<f.amount THEN 'partially paid' ELSE 'paid' END AS status
-  FROM fee_records f JOIN students s ON s.id=f.student_id
-  LEFT JOIN fee_payments p ON p.fee_record_id=f.id`;
 
 function presentFee(row: FeeRow) {
-  return { id: Number(row.id), studentId: Number(row.student_id), studentName: row.student_name, studentNumber: row.student_number, description: row.description, academicYear: row.academic_year, amount: Number(row.amount), dueDate: String(row.due_date).slice(0, 10), amountPaid: Number(row.amount_paid), balance: Number(row.balance), status: row.status };
+  return {
+    id: String(row._id), studentId: String(row.studentId._id), studentName: `${row.studentId.firstName} ${row.studentId.lastName}`,
+    studentNumber: row.studentId.studentNumber, description: row.description, academicYear: row.academicYear,
+    amount: fromCents(row.amountCents), dueDate: dayFromDate(row.dueDate), amountPaid: fromCents(row.paidCents),
+    balance: fromCents(Math.max(row.amountCents - row.paidCents, 0)), status: feeStatus(row.paidCents, row.amountCents),
+  };
 }
 
-function uniqueError(error: unknown): boolean { return typeof error === "object" && error !== null && "code" in error && error.code === "23505"; }
+/** Ledger totals for every fee matching the filter, shared with the dashboard. */
+export async function feeTotals(match: Record<string, unknown>) {
+  const [totals] = await Fee.aggregate<{ total: number; obligations: number; collected: number; outstanding: number }>([
+    { $match: match },
+    { $group: {
+      _id: null,
+      total: { $sum: 1 },
+      obligations: { $sum: "$amountCents" },
+      collected: { $sum: "$paidCents" },
+      outstanding: { $sum: { $max: [{ $subtract: ["$amountCents", "$paidCents"] }, 0] } },
+    } },
+  ]);
+  return {
+    total: totals?.total ?? 0,
+    obligations: fromCents(totals?.obligations ?? 0),
+    collected: fromCents(totals?.collected ?? 0),
+    outstanding: fromCents(totals?.outstanding ?? 0),
+  };
+}
 
-export function feesRouter(pool: Pool, secret: string): Router {
+function presentPayment(row: { _id: Types.ObjectId; amountCents: number; paidAt: Date; referenceCode: string }) {
+  return { id: String(row._id), amount: fromCents(row.amountCents), paidAt: row.paidAt, referenceCode: row.referenceCode };
+}
+
+export function feesRouter(secret: string): Router {
   const router = Router();
-  router.use(requireAuth(secret, pool));
+  router.use(requireAuth(secret));
 
   router.get("/", async (req, res) => {
-    if (req.user?.role === "teacher") throw new ApiError(403, "Fee information is limited to administrators and the student concerned.", "FORBIDDEN");
-    const filters: string[] = [];
-    const values: number[] = [];
-    if (req.user?.role === "student") { values.push(req.user.studentId ?? -1); filters.push(`f.student_id=$${values.length}`); }
-    if (typeof req.query.studentId === "string" && req.query.studentId && req.user?.role === "admin") { values.push(requirePositiveId(req.query.studentId, "Student ID")); filters.push(`f.student_id=$${values.length}`); }
-    const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
-    const result = await pool.query<FeeRow>(`${feeSelect} ${where} GROUP BY f.id,s.id ORDER BY f.due_date DESC LIMIT 300`, values);
-    const totals = await pool.query<{ total: number; obligations: number; collected: number; outstanding: number }>(
-      `SELECT COUNT(*)::int AS total,
-              COALESCE(SUM(amount),0)::float8 AS obligations,
-              COALESCE(SUM(paid),0)::float8 AS collected,
-              COALESCE(SUM(GREATEST(amount-paid,0)),0)::float8 AS outstanding
-       FROM (
-         SELECT f.id,f.amount,COALESCE(SUM(p.amount),0) AS paid
-         FROM fee_records f LEFT JOIN fee_payments p ON p.fee_record_id=f.id
-         ${where} GROUP BY f.id
-       ) scoped`,
-      values,
-    );
-    const summary = totals.rows[0] ?? { total: 0, obligations: 0, collected: 0, outstanding: 0 };
-    res.json({ data: result.rows.map(presentFee), meta: { total: summary.total, summary: { obligations: summary.obligations, collected: summary.collected, outstanding: summary.outstanding } } });
+    if (req.user?.role === "teacher") throw new ApiError(403, TEACHER_DENIED, "FORBIDDEN");
+    const match: Record<string, unknown> = {};
+    if (req.user?.role === "student") match.studentId = currentStudentId(req);
+    if (typeof req.query.studentId === "string" && req.query.studentId && req.user?.role === "admin") match.studentId = requireObjectId(req.query.studentId, "Student ID");
+    const [rows, totals] = await Promise.all([
+      Fee.find(match).sort({ dueDate: -1, _id: -1 }).limit(300)
+        .populate<{ studentId: FeeStudent }>("studentId", STUDENT_FIELDS).lean<FeeRow[]>(),
+      feeTotals(match),
+    ]);
+    const { total, ...summary } = totals;
+    res.json({ data: rows.map(presentFee), meta: { total, summary } });
   });
 
   router.post("/", requireRole("admin"), async (req, res) => {
-    const studentId = requirePositiveId(req.body?.studentId, "Student ID");
+    const studentId = requireObjectId(req.body?.studentId, "Student ID");
     const description = requireString(req.body?.description, "Description", 120);
     const academicYear = requireString(req.body?.academicYear, "Academic year", 16);
     const amount = requireAmount(req.body?.amount, "Amount");
     const dueDate = requireDate(req.body?.dueDate, "Due date");
-    const result = await pool.query<{ id: string }>(
-      `INSERT INTO fee_records(student_id,description,academic_year,amount,due_date,created_by)
-       VALUES($1,$2,$3,$4,$5,$6) RETURNING id`,
-      [studentId, description, academicYear, amount, dueDate, req.user?.id],
-    ).catch((error: unknown) => {
-      if (uniqueError(error)) throw new ApiError(409, "That fee obligation already exists for this student and academic year.", "DUPLICATE_RECORD");
-      if (foreignKeyError(error)) throw new ApiError(400, "The selected student does not exist.", "VALIDATION_ERROR");
-      throw error;
-    });
-    const rows = await pool.query<FeeRow>(`${feeSelect} WHERE f.id=$1 GROUP BY f.id,s.id`, [result.rows[0]?.id]);
-    res.status(201).json({ data: rows.rows[0] ? presentFee(rows.rows[0]) : null });
+    if (!(await Student.exists({ _id: studentId }))) throw new ApiError(400, "The selected student does not exist.", "VALIDATION_ERROR");
+    const created = await Fee.create({ studentId, description, academicYear, amountCents: toCents(amount), dueDate: dateFromDay(dueDate), createdBy: currentUserId(req) })
+      .catch(conflictOnDuplicate("That fee obligation already exists for this student and academic year."));
+    const row = await Fee.findById(created._id).populate<{ studentId: FeeStudent }>("studentId", STUDENT_FIELDS).lean<FeeRow>();
+    res.status(201).json({ data: row ? presentFee(row) : null });
   });
 
   router.post("/:id/payments", requireRole("admin"), async (req, res) => {
-    const feeId = requirePositiveId(req.params.id, "Fee record ID");
+    const feeId = requireObjectId(req.params.id, "Fee record ID");
     const amount = requireAmount(req.body?.amount, "Payment amount");
+    const amountCents = toCents(amount);
     const referenceCode = req.body?.referenceCode ? requireString(req.body.referenceCode, "Reference code", 80) : `LOCAL-${randomUUID()}`;
 
-    const payment = await inTransaction(pool, async (client) => {
-      const fee = await client.query<{ amount: string }>("SELECT amount FROM fee_records WHERE id=$1 FOR UPDATE", [feeId]);
-      if (!fee.rows[0]) throw new ApiError(404, "Fee record was not found.", "NOT_FOUND");
-      const paid = await client.query<{ total: string }>("SELECT COALESCE(SUM(amount),0)::text AS total FROM fee_payments WHERE fee_record_id=$1", [feeId]);
-      const balance = Number(fee.rows[0].amount) - Number(paid.rows[0]?.total ?? 0);
-      assert(amount <= balance + 0.00001, 400, "Payment cannot be greater than the outstanding balance.", "VALIDATION_ERROR");
-      const result = await client.query<{ id: string; paid_at: Date }>(
-        `INSERT INTO fee_payments(fee_record_id,amount,reference_code,recorded_by)
-         VALUES($1,$2,$3,$4) RETURNING id,paid_at`,
-        [feeId, amount, referenceCode, req.user?.id],
-      );
-      return result.rows[0];
-    }).catch((error: unknown) => {
-      if (uniqueError(error)) throw new ApiError(409, "That payment reference has already been used.", "DUPLICATE_RECORD");
+    // Reserve the amount with one guarded, atomic update: two concurrent payments
+    // cannot both pass the balance check, so the fee can never be overpaid.
+    const fee = await Fee.findOneAndUpdate(
+      { _id: feeId, $expr: { $lte: [{ $add: ["$paidCents", amountCents] }, "$amountCents"] } },
+      { $inc: { paidCents: amountCents } },
+    ).select("studentId").lean();
+    if (!fee) {
+      if (!(await Fee.exists({ _id: feeId }))) throw new ApiError(404, "Fee record was not found.", "NOT_FOUND");
+      assert(false, 400, "Payment cannot be greater than the outstanding balance.", "VALIDATION_ERROR");
+    }
+
+    let payment;
+    try {
+      payment = await Payment.create({ feeId, studentId: fee.studentId, amountCents, referenceCode, recordedBy: currentUserId(req) });
+    } catch (error) {
+      await Fee.updateOne({ _id: feeId }, { $inc: { paidCents: -amountCents } });
+      if (isDuplicateKey(error)) throw new ApiError(409, "That payment reference has already been used.", "DUPLICATE_RECORD");
       throw error;
-    });
-    res.status(201).json({ data: { id: payment?.id ? Number(payment.id) : null, feeRecordId: feeId, amount, referenceCode, paidAt: payment?.paid_at ?? null } });
+    }
+    res.status(201).json({ data: { id: String(payment._id), feeRecordId: String(feeId), amount, referenceCode, paidAt: payment.paidAt } });
   });
 
   router.get("/:id/payments", async (req, res) => {
-    const feeId = requirePositiveId(req.params.id, "Fee record ID");
-    if (req.user?.role === "teacher") throw new ApiError(403, "Fee information is limited to administrators and the student concerned.", "FORBIDDEN");
+    const feeId = requireObjectId(req.params.id, "Fee record ID");
+    if (req.user?.role === "teacher") throw new ApiError(403, TEACHER_DENIED, "FORBIDDEN");
     if (req.user?.role === "student") {
       // Scope the lookup before checking existence, so foreign IDs reveal nothing.
-      const ownFee = await pool.query("SELECT 1 FROM fee_records WHERE id=$1 AND student_id=$2", [feeId, req.user.studentId ?? -1]);
-      if (!ownFee.rowCount) throw new ApiError(403, "You can only view your own payments.", "FORBIDDEN");
-    } else {
-      const fee = await pool.query("SELECT 1 FROM fee_records WHERE id=$1", [feeId]);
-      if (!fee.rowCount) throw new ApiError(404, "Fee record was not found.", "NOT_FOUND");
+      if (!(await Fee.exists({ _id: feeId, studentId: currentStudentId(req) }))) throw new ApiError(403, "You can only view your own payments.", "FORBIDDEN");
+    } else if (!(await Fee.exists({ _id: feeId }))) {
+      throw new ApiError(404, "Fee record was not found.", "NOT_FOUND");
     }
-    const payments = await pool.query<{ id: string; amount: string; paid_at: Date; reference_code: string }>(
-      "SELECT id,amount,paid_at,reference_code FROM fee_payments WHERE fee_record_id=$1 ORDER BY paid_at DESC", [feeId],
-    );
-    res.json({ data: payments.rows.map((row) => ({ id: Number(row.id), amount: Number(row.amount), paidAt: row.paid_at, referenceCode: row.reference_code })) });
+    const payments = await Payment.find({ feeId }).sort({ paidAt: -1 }).lean();
+    res.json({ data: payments.map(presentPayment) });
   });
 
   return router;
 }
 
-function foreignKeyError(error: unknown): boolean { return typeof error === "object" && error !== null && "code" in error && error.code === "23503"; }
+export function paymentsRouter(secret: string): Router {
+  const router = Router();
+  router.use(requireAuth(secret));
+
+  router.get("/", async (req, res) => {
+    if (req.user?.role === "teacher") throw new ApiError(403, TEACHER_DENIED, "FORBIDDEN");
+    const page = req.query.page === undefined ? 1 : requirePositiveInteger(req.query.page, "Page");
+    assert(page <= 1_000_000, 400, "Page must be at most 1000000.", "VALIDATION_ERROR");
+    const match: Record<string, unknown> = {};
+    if (req.user?.role === "student") match.studentId = currentStudentId(req);
+    if (typeof req.query.studentId === "string" && req.query.studentId && req.user?.role === "admin") match.studentId = requireObjectId(req.query.studentId, "Student ID");
+    const [rows, total] = await Promise.all([
+      Payment.find(match).sort({ paidAt: -1, _id: -1 }).skip((page - 1) * PAYMENTS_PER_PAGE).limit(PAYMENTS_PER_PAGE).lean(),
+      Payment.countDocuments(match),
+    ]);
+    res.json({
+      data: rows.map((row) => ({ ...presentPayment(row), feeRecordId: String(row.feeId), studentId: String(row.studentId) })),
+      meta: { page, limit: PAYMENTS_PER_PAGE, total, pages: Math.ceil(total / PAYMENTS_PER_PAGE) },
+    });
+  });
+
+  return router;
+}

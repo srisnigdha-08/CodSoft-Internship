@@ -1,13 +1,18 @@
 import bcrypt from "bcryptjs";
-import type { PoolClient } from "pg";
-import { pool } from "./db.js";
-import { inTransaction } from "./database.js";
+import type { Types } from "mongoose";
+import { assertSeedAllowed, formatDatabaseFailure } from "./databaseGuards.js";
+import { addDays, dateFromDay, today } from "./dates.js";
+import { connectDatabase, disconnectDatabase } from "./db.js";
+import { getMongoConfig } from "./env.js";
+import { allModels, Attendance, Exam, Fee, Payment, Result, SchoolClass, Student, Teacher, User, type AttendanceStatus, type Role } from "./models/index.js";
 
 const TARGET_STUDENTS = 150;
 const TARGET_TEACHERS = 15;
+const SCHOOL_DAYS = 31;
 const CLASS_GROUPS = ["Grade 6", "Grade 7", "Grade 8", "Grade 9", "Grade 10"];
 const SECTIONS = ["A", "B"];
 const SUBJECTS = ["Mathematics", "Science", "English"];
+const EXAM_DATES = ["2026-09-15", "2026-09-17", "2026-09-19"];
 const firstNames = [
   "Ari", "Mira", "Dev", "Nia", "Ishan", "Tara", "Rohan", "Leela", "Kabir", "Anaya",
   "Neil", "Sana", "Vihaan", "Ira", "Arjun", "Diya", "Kian", "Meera", "Ayaan", "Riya",
@@ -26,294 +31,245 @@ const teacherNames = [
 ] as const;
 const teacherSubjects = ["Science", "English", "History", "Computer Science", "Mathematics"] as const;
 
-type DemoRole = "admin" | "teacher" | "student";
-
-interface DemoStudent {
-  id: number;
-  studentNumber: string;
-  classId: number;
-}
-
-interface DemoClass {
-  id: number;
-  name: string;
-  section: string;
-  teacherUserId: number | null;
-}
-
-async function ensureUser(client: PoolClient, email: string, role: DemoRole, passwordHash: string): Promise<number> {
-  await client.query(
-    "INSERT INTO users(email,password_hash,role) VALUES($1,$2,$3) ON CONFLICT(email) DO NOTHING",
-    [email, passwordHash, role],
-  );
-  const result = await client.query<{ id: string; role: string }>("SELECT id,role FROM users WHERE email=$1", [email]);
-  const user = result.rows[0];
-  if (!user || user.role !== role) throw new Error(`The demo login ${email} already exists with an incompatible role.`);
-  return Number(user.id);
-}
-
-async function ensureTeacher(
-  client: PoolClient,
-  userId: number,
-  firstName: string,
-  lastName: string,
-  employeeNumber: string,
-  subject: string,
-): Promise<number> {
-  await client.query(
-    `INSERT INTO teachers(user_id,first_name,last_name,employee_number,subject)
-     VALUES($1,$2,$3,$4,$5) ON CONFLICT(user_id) DO NOTHING`,
-    [userId, firstName, lastName, employeeNumber, subject],
-  );
-  const result = await client.query<{ id: string }>("SELECT id FROM teachers WHERE user_id=$1", [userId]);
-  if (!result.rows[0]) throw new Error(`Could not resolve the teacher profile for ${employeeNumber}.`);
-  return Number(result.rows[0].id);
-}
-
 function pad(value: number, width = 3): string {
   return String(value).padStart(width, "0");
 }
 
-function fictionalBirthDate(number: number): string {
+function fictionalBirthDate(number: number): Date {
   const year = 2010 + (number % 4);
   const month = ((number - 2) % 12) + 1;
   const day = ((number * 7) % 27) + 1;
-  return `${year}-${pad(month, 2)}-${pad(day, 2)}`;
+  return dateFromDay(`${year}-${pad(month, 2)}-${pad(day, 2)}`);
+}
+
+type BulkOperation = { updateOne: { filter: Record<string, unknown>; update: Record<string, unknown>; upsert?: boolean } };
+type BulkWriter = { bulkWrite: (operations: never[], options: { ordered: boolean; timestamps: boolean }) => Promise<unknown> };
+
+/** Insert-only upsert: an existing document is left exactly as it is. */
+function insertIfMissing(filter: Record<string, unknown>, fields: Record<string, unknown>, now: Date): BulkOperation {
+  return { updateOne: { filter, update: { $setOnInsert: { ...fields, createdAt: fields.createdAt ?? now, updatedAt: now } }, upsert: true } };
+}
+
+async function writeAll(model: BulkWriter, operations: BulkOperation[]): Promise<void> {
+  for (let start = 0; start < operations.length; start += 1000) {
+    await model.bulkWrite(operations.slice(start, start + 1000) as never[], { ordered: true, timestamps: false });
+  }
+}
+
+async function ensureUsers(accounts: Array<{ email: string; role: Role; name: string; passwordHash: string }>, now: Date): Promise<Map<string, Types.ObjectId>> {
+  await writeAll(User, accounts.map((account) => insertIfMissing({ email: account.email }, { ...account, status: "active" }, now)));
+  const rows = await User.find({ email: { $in: accounts.map((account) => account.email) } }).select("email role").lean();
+  const byEmail = new Map(rows.map((row) => [row.email, row]));
+  return new Map(accounts.map((account) => {
+    const user = byEmail.get(account.email);
+    if (!user || user.role !== account.role) throw new Error(`The demo login ${account.email} already exists with an incompatible role.`);
+    return [account.email, user._id];
+  }));
+}
+
+function attendanceStatus(number: number, day: Date): AttendanceStatus {
+  const dayOfYear = Math.floor((day.getTime() - Date.UTC(day.getUTCFullYear(), 0, 0)) / 86_400_000);
+  const isoWeekday = day.getUTCDay() || 7;
+  const roll = (number * 37 + dayOfYear * 17 + dayOfYear * dayOfYear * 3) % 100;
+  const absentCutoff = 8 + ((dayOfYear * 7 + isoWeekday * 3) % 9);
+  const lateCutoff = 1 + ((dayOfYear * 11 + isoWeekday) % 4);
+  if (roll < absentCutoff) return "absent";
+  return roll < absentCutoff + lateCutoff ? "late" : "present";
+}
+
+function recentSchoolDays(count: number): Date[] {
+  const days: Date[] = [];
+  for (let cursor = today(); days.length < count; cursor = addDays(cursor, -1)) {
+    if (cursor.getUTCDay() !== 0 && cursor.getUTCDay() !== 6) days.push(cursor);
+  }
+  return days;
 }
 
 async function seed(): Promise<void> {
-  if (process.env.NODE_ENV === "production") {
-    throw new Error("The demo seed is disabled when NODE_ENV=production.");
-  }
+  const { uri, databaseName } = getMongoConfig();
+  assertSeedAllowed(process.env.NODE_ENV, databaseName);
+  await connectDatabase(uri);
 
   const [adminHash, teacherHash, studentHash] = await Promise.all([
     bcrypt.hash("Admin@12345", 12),
     bcrypt.hash("Teacher@12345", 12),
     bcrypt.hash("Student@12345", 12),
   ]);
+  const now = new Date();
 
-  const counts = await inTransaction(pool, async (client) => {
-    const adminId = await ensureUser(client, "admin@school.local", "admin", adminHash);
-    const teacherIds: number[] = [];
-
-    const baselineTeacherUserId = await ensureUser(client, "teacher@school.local", "teacher", teacherHash);
-    teacherIds.push(await ensureTeacher(client, baselineTeacherUserId, "Avery", "Morgan", "T-1001", "Mathematics"));
-
-    for (let teacherNumber = 2; teacherNumber <= TARGET_TEACHERS; teacherNumber += 1) {
-      const index = teacherNumber - 2;
-      const [firstName, lastName] = teacherNames[index] ?? ["Demo", `Teacher${teacherNumber}`];
-      const email = `teacher${pad(teacherNumber)}@staff.example.test`;
-      const userId = await ensureUser(client, email, "teacher", teacherHash);
-      teacherIds.push(await ensureTeacher(
-        client,
-        userId,
-        firstName,
-        lastName,
-        `T-${pad(1000 + teacherNumber)}`,
-        teacherSubjects[index % teacherSubjects.length] ?? "Mathematics",
-      ));
-    }
-
-    const demoClasses: DemoClass[] = [];
-    let classIndex = 0;
-    for (const grade of CLASS_GROUPS) {
-      for (const section of SECTIONS) {
-        const teacherPosition = classIndex % teacherIds.length;
-        const teacherId = teacherIds[teacherPosition] ?? teacherIds[0];
-        await client.query(
-          `INSERT INTO classes(name,section,teacher_id) VALUES($1,$2,$3)
-           ON CONFLICT(name,section) DO NOTHING`,
-          [grade, section, teacherId],
-        );
-        const result = await client.query<{ id: string; teacher_user_id: string | null }>(
-          `SELECT c.id,t.user_id AS teacher_user_id FROM classes c
-           LEFT JOIN teachers t ON t.id=c.teacher_id WHERE c.name=$1 AND c.section=$2`,
-          [grade, section],
-        );
-        if (!result.rows[0]) throw new Error(`Could not resolve class ${grade} ${section}.`);
-        demoClasses.push({ id: Number(result.rows[0].id), name: grade, section, teacherUserId: result.rows[0].teacher_user_id ? Number(result.rows[0].teacher_user_id) : null });
-        classIndex += 1;
-      }
-    }
-
-    const baselineStudentUserId = await ensureUser(client, "student@school.local", "student", studentHash);
-    const baselineClass = demoClasses.find((item) => item.name === "Grade 10" && item.section === "A");
-    if (!baselineClass) throw new Error("The baseline class is missing.");
-    await client.query(
-      `INSERT INTO students(user_id,first_name,last_name,student_number,class_id,date_of_birth,phone)
-       VALUES($1,'Jordan','Lee','S-2026-001',$2,'2010-04-12','555-0102')
-       ON CONFLICT(user_id) DO NOTHING`,
-      [baselineStudentUserId, baselineClass.id],
-    );
-    const baselineProfile = await client.query<{ id: string; student_number: string; class_id: string | null }>(
-      "SELECT id,student_number,class_id FROM students WHERE user_id=$1",
-      [baselineStudentUserId],
-    );
-    if (baselineProfile.rows[0]?.student_number !== "S-2026-001" || !baselineProfile.rows[0]?.class_id) {
-      throw new Error("The existing baseline demo student profile conflicts with its stable student ID; no seed changes were committed.");
-    }
-    const students: DemoStudent[] = [{
-      id: Number(baselineProfile.rows[0].id),
-      studentNumber: baselineProfile.rows[0].student_number,
-      classId: Number(baselineProfile.rows[0].class_id),
-    }];
-
-    for (let number = 2; number <= TARGET_STUDENTS; number += 1) {
-      const nameIndex = number - 2;
-      const email = `student${pad(number)}@students.example.test`;
-      const userId = await ensureUser(client, email, "student", studentHash);
-      const classRecord = demoClasses[nameIndex % demoClasses.length] ?? baselineClass;
-      await client.query(
-        `INSERT INTO students(user_id,first_name,last_name,student_number,class_id,date_of_birth,phone,address,created_at)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,NOW() - ($9::int * INTERVAL '1 day'))
-         ON CONFLICT(user_id) DO NOTHING`,
-        [
-          userId,
-          firstNames[nameIndex % firstNames.length],
-          lastNames[nameIndex % lastNames.length],
-          `S-2026-${pad(number)}`,
-          classRecord.id,
-          fictionalBirthDate(number),
-          `555-01${pad((number - 2) % 100, 2)}`,
-          `${number} Example Way, Demo Borough, ZZ 00000`,
-          number % 180,
-        ],
-      );
-      const verify = await client.query<{ id: string; student_number: string; class_id: string | null }>(
-        "SELECT id,student_number,class_id FROM students WHERE user_id=$1",
-        [userId],
-      );
-      if (verify.rows[0]?.student_number !== `S-2026-${pad(number)}`) {
-        throw new Error(`A conflicting student profile exists for the demo login ${email}; no records were changed.`);
-      }
-      if (!verify.rows[0]?.class_id) throw new Error(`The demo student S-2026-${pad(number)} has no class assignment.`);
-      students.push({ id: Number(verify.rows[0].id), studentNumber: verify.rows[0].student_number, classId: Number(verify.rows[0].class_id) });
-    }
-
-    // Seed thirty school days (weekdays only) so the demo trend resembles a real term.
-    await client.query(
-      `WITH school_days AS (
-         SELECT day::date AS attendance_date
-         FROM generate_series(CURRENT_DATE - 41,CURRENT_DATE,INTERVAL '1 day') AS calendar(day)
-         WHERE EXTRACT(ISODOW FROM day) BETWEEN 1 AND 5
-         ORDER BY attendance_date DESC
-         LIMIT 30
-       )
-       INSERT INTO attendance(student_id,class_id,attendance_date,status,recorded_by)
-       SELECT s.id,s.class_id,d.attendance_date,
-              CASE WHEN pattern.status_roll < pattern.absent_cutoff THEN 'absent'
-                   WHEN pattern.status_roll < pattern.absent_cutoff + pattern.late_cutoff THEN 'late'
-                   ELSE 'present' END,
-              COALESCE(t.user_id,$1)
-       FROM students s
-       JOIN classes c ON c.id=s.class_id
-       LEFT JOIN teachers t ON t.id=c.teacher_id
-       CROSS JOIN school_days d
-       CROSS JOIN LATERAL (
-         SELECT MOD(s.id * 37 + EXTRACT(DOY FROM d.attendance_date)::bigint * 17
-                    + EXTRACT(DOY FROM d.attendance_date)::bigint * EXTRACT(DOY FROM d.attendance_date)::bigint * 3,100) AS status_roll,
-                8 + MOD(EXTRACT(DOY FROM d.attendance_date)::int * 7
-                        + EXTRACT(ISODOW FROM d.attendance_date)::int * 3,9) AS absent_cutoff,
-                1 + MOD(EXTRACT(DOY FROM d.attendance_date)::int * 11
-                        + EXTRACT(ISODOW FROM d.attendance_date)::int,4) AS late_cutoff
-       ) AS pattern
-       WHERE s.status='active' AND s.class_id IS NOT NULL AND s.id=ANY($2::bigint[])
-       ON CONFLICT(student_id,class_id,attendance_date) DO NOTHING`,
-      [adminId, students.map((student) => student.id)],
-    );
-
-    const exams: Array<{ id: number; classId: number; subjectIndex: number; teacherUserId: number }> = [];
-    for (const classRecord of demoClasses) {
-      for (let subjectIndex = 0; subjectIndex < SUBJECTS.length; subjectIndex += 1) {
-        const subject = SUBJECTS[subjectIndex] ?? "Mathematics";
-        const title = `Term 1 ${subject}`;
-        // Preserve and reuse a pre-existing matching demo exam (including the original Avery/Jordan record).
-        let exam = await client.query<{ id: string }>(
-          "SELECT id FROM examinations WHERE title=$1 AND class_id=$2 ORDER BY exam_date LIMIT 1",
-          [title, classRecord.id],
-        );
-        if (!exam.rows[0]) {
-          const examDate = ["2026-09-15", "2026-09-17", "2026-09-19"][subjectIndex] ?? "2026-09-15";
-          await client.query(
-            `INSERT INTO examinations(title,class_id,exam_date,max_score,created_by)
-             VALUES($1,$2,$3,100,$4) ON CONFLICT(title,class_id,exam_date) DO NOTHING`,
-            [title, classRecord.id, examDate, classRecord.teacherUserId ?? adminId],
-          );
-          exam = await client.query<{ id: string }>(
-            "SELECT id FROM examinations WHERE title=$1 AND class_id=$2 ORDER BY exam_date LIMIT 1",
-            [title, classRecord.id],
-          );
-        }
-        if (!exam.rows[0]) throw new Error(`Could not resolve ${title} for ${classRecord.name} ${classRecord.section}.`);
-        exams.push({ id: Number(exam.rows[0].id), classId: classRecord.id, subjectIndex, teacherUserId: classRecord.teacherUserId ?? adminId });
-      }
-    }
-
-    for (const exam of exams) {
-      await client.query(
-        `INSERT INTO academic_results(student_id,examination_id,score,recorded_by)
-         SELECT s.id,$1,50 + ((s.id * 17 + $2 * 11) % 46),$3
-         FROM students s WHERE s.class_id=$4 AND s.status='active' AND s.id=ANY($5::bigint[])
-         ON CONFLICT(student_id,examination_id) DO NOTHING`,
-        [exam.id, exam.subjectIndex, exam.teacherUserId, exam.classId, students.filter((student) => student.classId === exam.classId).map((student) => student.id)],
-      );
-    }
-
-    // Annual tuition has three deterministic states: pending, partial, or paid.
-    for (let index = 0; index < students.length; index += 1) {
-      const student = students[index];
-      if (!student) continue;
-      const amount = 72000 + ((index % 5) * 6000);
-      await client.query(
-        `INSERT INTO fee_records(student_id,description,academic_year,amount,due_date,created_by)
-         VALUES($1,'Annual tuition','2026-27',$2,'2027-03-31',$3)
-         ON CONFLICT(student_id,description,academic_year) DO NOTHING`,
-        [student.id, amount, adminId],
-      );
-      const feeResult = await client.query<{ id: string; amount: string }>(
-        "SELECT id,amount FROM fee_records WHERE student_id=$1 AND description='Annual tuition' AND academic_year='2026-27'",
-        [student.id],
-      );
-      const fee = feeResult.rows[0];
-      if (!fee) throw new Error(`Could not resolve the tuition record for ${student.studentNumber}.`);
-      const state = index % 3;
-      if (state === 0) continue;
-      const feeAmount = Number(fee.amount);
-      const paymentAmount = state === 1 ? Math.round(feeAmount * 0.4 * 100) / 100 : feeAmount;
-      const referenceCode = `DEMO-ANNUAL-${student.studentNumber}`;
-      await client.query(
-        `INSERT INTO fee_payments(fee_record_id,amount,paid_at,reference_code,recorded_by)
-         VALUES($1,$2,TIMESTAMPTZ '2026-09-20 12:00:00+00' + ($3::int * INTERVAL '1 day'),$4,$5)
-         ON CONFLICT(reference_code) DO NOTHING`,
-        [fee.id, paymentAmount, index % 20, referenceCode, adminId],
-      );
-    }
-
-    const totals = await client.query<Record<string, string>>(
-      `SELECT (SELECT COUNT(*) FROM users)::text AS users,
-              (SELECT COUNT(*) FROM teachers)::text AS teachers,
-              (SELECT COUNT(*) FROM classes)::text AS classes,
-              (SELECT COUNT(*) FROM students)::text AS students,
-              (SELECT COUNT(*) FROM attendance)::text AS attendance,
-              (SELECT COUNT(*) FROM examinations)::text AS examinations,
-              (SELECT COUNT(*) FROM academic_results)::text AS academic_results,
-              (SELECT COUNT(*) FROM fee_records)::text AS fee_records,
-              (SELECT COUNT(*) FROM fee_payments)::text AS fee_payments`,
-    );
-    return totals.rows[0] ?? {};
+  // Teachers.
+  const teacherPlans = Array.from({ length: TARGET_TEACHERS }, (_, position) => {
+    const number = position + 1;
+    if (number === 1) return { email: "teacher@school.local", firstName: "Avery", lastName: "Morgan", employeeNumber: "T-1001", subject: "Mathematics" };
+    const index = number - 2;
+    const [firstName, lastName] = teacherNames[index] ?? ["Demo", `Teacher${number}`];
+    return { email: `teacher${pad(number)}@staff.example.test`, firstName, lastName, employeeNumber: `T-${pad(1000 + number)}`, subject: teacherSubjects[index % teacherSubjects.length] ?? "Mathematics" };
   });
+  const adminUsers = await ensureUsers([{ email: "admin@school.local", role: "admin", name: "School Administrator", passwordHash: adminHash }], now);
+  const adminId = adminUsers.get("admin@school.local");
+  if (!adminId) throw new Error("The administrator account could not be resolved.");
+  const teacherUsers = await ensureUsers(teacherPlans.map((plan) => ({ email: plan.email, role: "teacher", name: `${plan.firstName} ${plan.lastName}`, passwordHash: teacherHash })), now);
+  await writeAll(Teacher, teacherPlans.map(({ email, ...fields }) => insertIfMissing({ userId: teacherUsers.get(email) }, { ...fields, userId: teacherUsers.get(email), status: "active" }, now)));
+  const teachers = await Teacher.find({ userId: { $in: [...teacherUsers.values()] } }).select("userId employeeNumber").lean();
+  const teacherByNumber = new Map(teachers.map((row) => [row.employeeNumber, row]));
+  for (const plan of teacherPlans) {
+    if (!teacherByNumber.has(plan.employeeNumber)) throw new Error(`A conflicting teacher profile exists for the demo login ${plan.email}; stopping.`);
+  }
 
+  // Classes.
+  const classPlans = CLASS_GROUPS.flatMap((name) => SECTIONS.map((section) => ({ name, section })));
+  await writeAll(SchoolClass, classPlans.map((plan, index) => {
+    const teacherPlan = teacherPlans[index % teacherPlans.length];
+    return insertIfMissing({ name: plan.name, section: plan.section }, { ...plan, teacherId: teacherPlan ? teacherByNumber.get(teacherPlan.employeeNumber)?._id ?? null : null }, now);
+  }));
+  const classRows = await SchoolClass.find({ $or: classPlans }).lean();
+  const classKey = (name: string, section: string) => `${name}|${section}`;
+  const classByKey = new Map(classRows.map((row) => [classKey(row.name, row.section), row]));
+  const orderedClasses = classPlans.map((plan) => {
+    const row = classByKey.get(classKey(plan.name, plan.section));
+    if (!row) throw new Error(`Could not resolve class ${plan.name} ${plan.section}.`);
+    return row;
+  });
+  const teacherUserOf = new Map(teachers.map((row) => [String(row._id), row.userId]));
+  const recorderFor = (teacherId: Types.ObjectId | null) => (teacherId ? teacherUserOf.get(String(teacherId)) : undefined) ?? adminId;
+
+  // Students.
+  const baselineClass = classByKey.get(classKey("Grade 10", "A"));
+  if (!baselineClass) throw new Error("The baseline class is missing.");
+  const studentPlans = Array.from({ length: TARGET_STUDENTS }, (_, position) => {
+    const number = position + 1;
+    if (number === 1) {
+      return { number, email: "student@school.local", firstName: "Jordan", lastName: "Lee", classId: baselineClass._id, dateOfBirth: dateFromDay("2010-04-12"), phone: "555-0102", address: null as string | null, createdAt: now };
+    }
+    const index = number - 2;
+    return {
+      number, email: `student${pad(number)}@students.example.test`, firstName: firstNames[index % firstNames.length] ?? "Demo", lastName: lastNames[index % lastNames.length] ?? "Student",
+      classId: (orderedClasses[index % orderedClasses.length] ?? baselineClass)._id, dateOfBirth: fictionalBirthDate(number), phone: `555-01${pad((number - 2) % 100, 2)}`,
+      address: `${number} Example Way, Demo Borough, ZZ 00000`, createdAt: addDays(now, -(number % 180)),
+    };
+  });
+  const studentNumberOf = (number: number) => `S-2026-${pad(number)}`;
+  const studentUsers = await ensureUsers(studentPlans.map((plan) => ({ email: plan.email, role: "student", name: `${plan.firstName} ${plan.lastName}`, passwordHash: studentHash })), now);
+  await writeAll(Student, studentPlans.map(({ number, email, ...fields }) => insertIfMissing({ userId: studentUsers.get(email) }, { ...fields, userId: studentUsers.get(email), studentNumber: studentNumberOf(number), status: "active" }, now)));
+  const studentRows = await Student.find({ userId: { $in: [...studentUsers.values()] } }).select("studentNumber classId status").lean();
+  const studentByNumber = new Map(studentRows.map((row) => [row.studentNumber, row]));
+  const students = studentPlans.map((plan) => {
+    const row = studentByNumber.get(studentNumberOf(plan.number));
+    if (!row) throw new Error(`A conflicting student profile exists for the demo login ${plan.email}; stopping.`);
+    return { number: plan.number, _id: row._id, classId: row.classId, status: row.status, studentNumber: row.studentNumber };
+  });
+  const teacherOfClass = new Map(classRows.map((row) => [String(row._id), row.teacherId]));
+
+  // Attendance: a student that already has a full history is left alone, so
+  // running the seed on a later date does not extend the data set.
+  const existingCounts = await Attendance.aggregate<{ _id: Types.ObjectId; count: number }>([
+    { $match: { studentId: { $in: students.map((student) => student._id) } } },
+    { $group: { _id: "$studentId", count: { $sum: 1 } } },
+  ]);
+  const countByStudent = new Map(existingCounts.map((row) => [String(row._id), row.count]));
+  const schoolDays = recentSchoolDays(SCHOOL_DAYS);
+  await writeAll(Attendance, students
+    .filter((student) => student.status === "active" && student.classId && (countByStudent.get(String(student._id)) ?? 0) < SCHOOL_DAYS)
+    .flatMap((student) => schoolDays.map((date) => insertIfMissing(
+      { studentId: student._id, classId: student.classId, date },
+      { studentId: student._id, classId: student.classId, date, status: attendanceStatus(student.number, date), recordedBy: recorderFor(teacherOfClass.get(String(student.classId)) ?? null), corrections: [] },
+      now,
+    ))));
+
+  // Examinations and results: reuse any existing exam with the same title and class.
+  const titleOf = (subject: string) => `Term 1 ${subject}`;
+  const existingExams = await Exam.find({ classId: { $in: orderedClasses.map((row) => row._id) }, title: { $in: SUBJECTS.map(titleOf) } }).sort({ date: 1 }).lean();
+  const examKey = (classId: Types.ObjectId, title: string) => `${String(classId)}|${title}`;
+  const examByKey = new Map<string, Types.ObjectId>();
+  for (const exam of existingExams) if (!examByKey.has(examKey(exam.classId, exam.title))) examByKey.set(examKey(exam.classId, exam.title), exam._id);
+
+  const resultOperations: BulkOperation[] = [];
+  for (const classRecord of orderedClasses) {
+    for (const [subjectIndex, subject] of SUBJECTS.entries()) {
+      const title = titleOf(subject);
+      let examId = examByKey.get(examKey(classRecord._id, title));
+      if (!examId) {
+        const created = await Exam.create({ title, classId: classRecord._id, date: dateFromDay(EXAM_DATES[subjectIndex] ?? "2026-09-15"), maxScore: 100, createdBy: recorderFor(classRecord.teacherId) });
+        examId = created._id;
+      }
+      for (const student of students) {
+        if (student.status !== "active" || !student.classId?.equals(classRecord._id)) continue;
+        resultOperations.push(insertIfMissing(
+          { studentId: student._id, examId },
+          { studentId: student._id, examId, score: 50 + ((student.number * 17 + subjectIndex * 11) % 46), recordedBy: recorderFor(classRecord.teacherId) },
+          now,
+        ));
+      }
+    }
+  }
+  await writeAll(Result, resultOperations);
+
+  // Fees: one annual tuition per student with deterministic pending, partial,
+  // and paid states, plus the original baseline term fee and its payment.
+  const YEAR = "2026-27";
+  const tuitionAmountCents = (index: number) => (72_000 + (index % 5) * 6_000) * 100;
+  const baseline = students[0];
+  if (!baseline) throw new Error("The baseline student is missing.");
+  await writeAll(Fee, [
+    ...students.map((student, index) => insertIfMissing(
+      { studentId: student._id, description: "Annual tuition", academicYear: YEAR },
+      { studentId: student._id, description: "Annual tuition", academicYear: YEAR, amountCents: tuitionAmountCents(index), paidCents: 0, dueDate: dateFromDay("2027-03-31"), createdBy: adminId },
+      now,
+    )),
+    insertIfMissing(
+      { studentId: baseline._id, description: "Term 1 tuition", academicYear: YEAR },
+      { studentId: baseline._id, description: "Term 1 tuition", academicYear: YEAR, amountCents: 4_500_000, paidCents: 0, dueDate: dateFromDay("2026-11-14"), createdBy: adminId },
+      now,
+    ),
+  ]);
+  const fees = await Fee.find({ studentId: { $in: students.map((student) => student._id) }, academicYear: YEAR, description: { $in: ["Annual tuition", "Term 1 tuition"] } }).lean();
+  const feeKey = (studentId: Types.ObjectId, description: string) => `${String(studentId)}|${description}`;
+  const feeByKey = new Map(fees.map((fee) => [feeKey(fee.studentId, fee.description), fee]));
+
+  const paymentOperations = students.flatMap((student, index) => {
+    const state = index % 3;
+    const fee = feeByKey.get(feeKey(student._id, "Annual tuition"));
+    if (state === 0 || !fee) return [];
+    const amountCents = state === 1 ? Math.round(fee.amountCents * 0.4) : fee.amountCents;
+    const referenceCode = `DEMO-ANNUAL-${student.studentNumber}`;
+    return [insertIfMissing(
+      { referenceCode },
+      { feeId: fee._id, studentId: student._id, amountCents, referenceCode, paidAt: new Date(Date.UTC(2026, 8, 20 + (index % 20), 12)), recordedBy: adminId },
+      now,
+    )];
+  });
+  const baselineFee = feeByKey.get(feeKey(baseline._id, "Term 1 tuition"));
+  if (baselineFee) {
+    paymentOperations.push(insertIfMissing(
+      { referenceCode: "DEMO-FEE-2026-27" },
+      { feeId: baselineFee._id, studentId: baseline._id, amountCents: 1_500_000, referenceCode: "DEMO-FEE-2026-27", paidAt: new Date("2026-10-15T16:34:32.000Z"), recordedBy: adminId },
+      now,
+    ));
+  }
+  await writeAll(Payment, paymentOperations);
+
+  // Derive each seeded fee's running total from its payments, which keeps the
+  // ledger correct whichever of the writes above were skipped on a repeat run.
+  const seededFeeIds = fees.map((fee) => fee._id);
+  const paidTotals = await Payment.aggregate<{ _id: Types.ObjectId; paid: number }>([
+    { $match: { feeId: { $in: seededFeeIds } } },
+    { $group: { _id: "$feeId", paid: { $sum: "$amountCents" } } },
+  ]);
+  const paidByFee = new Map(paidTotals.map((row) => [String(row._id), row.paid]));
+  const stale = fees.filter((fee) => fee.paidCents !== (paidByFee.get(String(fee._id)) ?? 0));
+  if (stale.length) {
+    await writeAll(Fee, stale.map((fee) => ({ updateOne: { filter: { _id: fee._id }, update: { $set: { paidCents: paidByFee.get(String(fee._id)) ?? 0 } } } })));
+  }
+
+  const totals = Object.fromEntries(await Promise.all(allModels.map(async (model) => [model.collection.name, await model.collection.countDocuments()] as const)));
   console.log("Fictional local demo data is ready. Existing account passwords and profiles were not overwritten.");
-  console.log("Database totals:", JSON.stringify(counts));
+  console.log("Database totals:", JSON.stringify(totals));
   console.log("New demo teacher and student accounts use their role demo password shown in the README.");
 }
 
 seed()
   .catch((error: unknown) => {
-    const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
-    const message = error instanceof Error ? error.message : "Unknown seed error.";
-    const safeMessage = message.replace(/(password\s*[:=]\s*)\S+/gi, "$1[redacted]");
-    console.error("Database seeding failed.", code ? `Database error code: ${code}.` : "", safeMessage);
+    console.error(formatDatabaseFailure(error, "Database seeding"));
     process.exitCode = 1;
   })
-  .finally(() => pool.end());
+  .finally(() => disconnectDatabase());

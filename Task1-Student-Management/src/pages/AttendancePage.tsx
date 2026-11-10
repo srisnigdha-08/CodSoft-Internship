@@ -30,7 +30,7 @@ export function AttendancePage({ user }: { user: User }) {
   const [correctionSaving, setCorrectionSaving] = useState(false)
   const [historyRefresh, setHistoryRefresh] = useState(0)
   const correctingId = correcting?.id
-  const eligibleStudents = useMemo(() => students.filter((student) => !draft.classId || student.classId === Number(draft.classId)), [students, draft.classId])
+  const eligibleStudents = useMemo(() => students.filter((student) => !draft.classId || student.classId === draft.classId), [students, draft.classId])
 
   useEffect(() => {
     let active = true
@@ -86,7 +86,7 @@ export function AttendancePage({ user }: { user: User }) {
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError(''); setNotice(''); setSaving(true)
     try {
-      await apiRequest('/attendance', { method: 'POST', body: JSON.stringify({ ...draft, classId: Number(draft.classId), studentId: Number(draft.studentId) }) })
+      await apiRequest('/attendance', { method: 'POST', body: JSON.stringify(draft) })
       setNotice('Attendance has been recorded.')
       setRefresh((value) => value + 1)
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not record attendance.') }
@@ -106,7 +106,7 @@ export function AttendancePage({ user }: { user: User }) {
         {correctionError && <ErrorMessage>{correctionError}</ErrorMessage>}
         <div className="modal-actions"><Button type="button" variant="secondary" onClick={() => setCorrecting(null)}>Close</Button><Button type="submit" disabled={correctionSaving || correctedStatus === correcting.status}>{correctionSaving ? 'Saving…' : 'Save correction'}</Button></div>
       </form>
-      <div className="correction-history"><h3>Correction history</h3>{historyLoading ? <Loading label="Loading corrections…" /> : corrections.length ? <ul>{corrections.map((item) => <li key={item.id}><strong>{item.previousStatus} → {item.newStatus}</strong><span>{new Date(item.correctedAt).toLocaleString()} · User #{item.correctedBy}</span></li>)}</ul> : <p className="muted">No corrections yet.</p>}</div>
+      <div className="correction-history"><h3>Correction history</h3>{historyLoading ? <Loading label="Loading corrections…" /> : corrections.length ? <ul>{corrections.map((item) => <li key={item.id}><strong>{item.previousStatus} → {item.newStatus}</strong><span>{new Date(item.correctedAt).toLocaleString()} · User …{item.correctedBy.slice(-6)}</span></li>)}</ul> : <p className="muted">No corrections yet.</p>}</div>
     </Modal>}
   </div>
 }

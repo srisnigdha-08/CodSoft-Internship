@@ -1,16 +1,17 @@
 import type { NextFunction, Request, Response } from "express";
-import type { Pool } from "pg";
 import jwt from "jsonwebtoken";
+import { Types } from "mongoose";
 import { ApiError } from "./errors.js";
+import { SchoolClass, Student, Teacher, User, type Role } from "./models/index.js";
 
-export type UserRole = "admin" | "teacher" | "student";
+export type UserRole = Role;
 
 export interface SessionUser {
-  id: number;
+  id: string;
   email: string;
   role: UserRole;
-  studentId?: number;
-  teacherId?: number;
+  studentId?: string;
+  teacherId?: string;
 }
 
 declare global {
@@ -51,7 +52,21 @@ export function clearSessionCookie(secure: boolean): string {
   return flags.join("; ");
 }
 
-export function requireAuth(secret: string, pool: Pool) {
+/** Builds the session for an active account, or null when its role's profile is inactive or missing. */
+export async function activeSession(user: { _id: Types.ObjectId; email: string; role: UserRole }): Promise<SessionUser | null> {
+  const session: SessionUser = { id: String(user._id), email: user.email, role: user.role };
+  if (user.role === "student") {
+    const student = await Student.findOne({ userId: user._id, status: "active" }).select("_id").lean();
+    return student ? { ...session, studentId: String(student._id) } : null;
+  }
+  if (user.role === "teacher") {
+    const teacher = await Teacher.findOne({ userId: user._id, status: "active" }).select("_id").lean();
+    return teacher ? { ...session, teacherId: String(teacher._id) } : null;
+  }
+  return session;
+}
+
+export function requireAuth(secret: string) {
   return async (req: Request, _res: Response, next: NextFunction): Promise<void> => {
     try {
       const token = readCookie(req, SESSION_COOKIE);
@@ -67,22 +82,10 @@ export function requireAuth(secret: string, pool: Pool) {
       }
       // Check current account and profile state on each request so deactivation
       // or role changes take effect before the signed cookie expires.
-      const current = await pool.query<{ id: string; email: string; role: UserRole; student_id: string | null; teacher_id: string | null }>(
-        `SELECT u.id,u.email,u.role,s.id AS student_id,t.id AS teacher_id
-         FROM users u
-         LEFT JOIN students s ON s.user_id=u.id AND s.status='active'
-         LEFT JOIN teachers t ON t.user_id=u.id AND t.status='active'
-         WHERE u.id=$1 AND u.email=$2 AND u.role=$3
-           AND (u.role='admin' OR (u.role='student' AND s.id IS NOT NULL) OR (u.role='teacher' AND t.id IS NOT NULL))`,
-        [payload.id, payload.email, payload.role],
-      );
-      const row = current.rows[0];
-      if (!row) throw new ApiError(401, "Your account is inactive or your session has expired. Please sign in again.", "UNAUTHENTICATED");
-      req.user = {
-        id: Number(row.id), email: row.email, role: row.role,
-        ...(row.student_id ? { studentId: Number(row.student_id) } : {}),
-        ...(row.teacher_id ? { teacherId: Number(row.teacher_id) } : {}),
-      };
+      const current = await User.findOne({ _id: new Types.ObjectId(payload.id), email: payload.email, role: payload.role, status: "active" }).select("email role").lean();
+      const session = current ? await activeSession(current) : null;
+      if (!session) throw new ApiError(401, "Your account is inactive or your session has expired. Please sign in again.", "UNAUTHENTICATED");
+      req.user = session;
       next();
     } catch (error) {
       next(error);
@@ -91,7 +94,7 @@ export function requireAuth(secret: string, pool: Pool) {
 }
 
 function isSessionUser(value: jwt.JwtPayload): value is jwt.JwtPayload & SessionUser {
-  return Number.isSafeInteger(value.id) && typeof value.email === "string" &&
+  return typeof value.id === "string" && /^[0-9a-f]{24}$/i.test(value.id) && typeof value.email === "string" &&
     (value.role === "admin" || value.role === "teacher" || value.role === "student");
 }
 
@@ -103,4 +106,30 @@ export function requireRole(...roles: UserRole[]) {
     }
     next();
   };
+}
+
+// requireAuth guarantees these profile IDs for the matching role; the checks
+// make a missing ID fail closed instead of widening a query.
+export function currentUserId(req: Request): Types.ObjectId {
+  if (!req.user) throw new ApiError(401, "Please sign in to continue.", "UNAUTHENTICATED");
+  return new Types.ObjectId(req.user.id);
+}
+
+export function currentStudentId(req: Request): Types.ObjectId {
+  if (!req.user?.studentId) throw new ApiError(403, "This account has no student profile.", "FORBIDDEN");
+  return new Types.ObjectId(req.user.studentId);
+}
+
+export function currentTeacherId(req: Request): Types.ObjectId {
+  if (!req.user?.teacherId) throw new ApiError(403, "This account has no teacher profile.", "FORBIDDEN");
+  return new Types.ObjectId(req.user.teacherId);
+}
+
+/** The classes a teacher is assigned to; every teacher-scoped query starts here. */
+export async function teacherClassIds(req: Request): Promise<Types.ObjectId[]> {
+  return SchoolClass.find({ teacherId: currentTeacherId(req) }).distinct("_id");
+}
+
+export async function teacherOwnsClass(req: Request, classId: Types.ObjectId): Promise<boolean> {
+  return (await SchoolClass.exists({ _id: classId, teacherId: currentTeacherId(req) })) !== null;
 }

@@ -1,82 +1,78 @@
 import { Router } from "express";
-import type { Pool } from "pg";
-import { requireAuth, requireRole } from "../auth.js";
-import { ApiError, requirePositiveId, requireString } from "../errors.js";
+import type { Types } from "mongoose";
+import { currentStudentId, currentTeacherId, requireAuth, requireRole } from "../auth.js";
+import { ApiError, conflictOnDuplicate, requireObjectId, requireString } from "../errors.js";
+import { SchoolClass, Student, Teacher, type ClassDocument } from "../models/index.js";
+import { NO_MATCH } from "../queryStages.js";
 
-interface ClassRow {
-  id: string;
-  name: string;
-  section: string;
-  teacher_id: string | null;
-  teacher_name: string | null;
-  student_count: string;
-}
+const DUPLICATE_MESSAGE = "That class and section already exist.";
 
-const classSelect = `SELECT c.id, c.name, c.section,
-  CASE WHEN t.id IS NULL THEN NULL ELSE c.teacher_id END AS teacher_id,
-  CASE WHEN t.id IS NULL THEN NULL ELSE t.first_name || ' ' || t.last_name END AS teacher_name,
-  (SELECT COUNT(*)::text FROM students s WHERE s.class_id = c.id AND s.status = 'active') AS student_count
-  FROM classes c LEFT JOIN teachers t ON t.id = c.teacher_id AND t.status = 'active'`;
+type ClassRow = ClassDocument & { _id: Types.ObjectId; teacher?: { _id: Types.ObjectId; firstName: string; lastName: string }; studentCount: number };
 
 function presentClass(row: ClassRow) {
-  return { id: Number(row.id), name: row.name, section: row.section, teacherId: row.teacher_id ? Number(row.teacher_id) : null, teacherName: row.teacher_name, studentCount: Number(row.student_count) };
+  return {
+    id: String(row._id), name: row.name, section: row.section,
+    // An inactive teacher is shown as unassigned, as is a class with no teacher.
+    teacherId: row.teacher ? String(row.teacher._id) : null,
+    teacherName: row.teacher ? `${row.teacher.firstName} ${row.teacher.lastName}` : null,
+    studentCount: row.studentCount,
+  };
 }
 
-export function classesRouter(pool: Pool, secret: string): Router {
+async function loadClasses(match: Record<string, unknown>): Promise<ClassRow[]> {
+  return SchoolClass.aggregate<ClassRow>([
+    { $match: match },
+    { $sort: { name: 1, section: 1 } },
+    { $lookup: { from: Teacher.collection.name, localField: "teacherId", foreignField: "_id", as: "teacher", pipeline: [{ $match: { status: "active" } }, { $project: { firstName: 1, lastName: 1 } }] } },
+    { $unwind: { path: "$teacher", preserveNullAndEmptyArrays: true } },
+    { $lookup: { from: Student.collection.name, localField: "_id", foreignField: "classId", as: "activeStudents", pipeline: [{ $match: { status: "active" } }, { $project: { _id: 1 } }] } },
+    { $addFields: { studentCount: { $size: "$activeStudents" } } },
+    { $project: { activeStudents: 0 } },
+  ]);
+}
+
+async function loadClass(id: Types.ObjectId) {
+  const [row] = await loadClasses({ _id: id });
+  return row ? presentClass(row) : null;
+}
+
+async function readBody(body: Record<string, unknown> | undefined) {
+  const name = requireString(body?.name, "Class name", 80);
+  const section = body?.section ? requireString(body.section, "Section", 40) : "A";
+  const teacherId = body?.teacherId ? requireObjectId(body.teacherId, "Teacher ID") : null;
+  if (teacherId && !(await Teacher.exists({ _id: teacherId, status: "active" }))) {
+    throw new ApiError(400, "The selected teacher is not active.", "VALIDATION_ERROR");
+  }
+  return { name, section, teacherId };
+}
+
+export function classesRouter(secret: string): Router {
   const router = Router();
-  router.use(requireAuth(secret, pool));
+  router.use(requireAuth(secret));
 
   router.get("/", async (req, res) => {
-    let filter = "";
-    const values: number[] = [];
+    let match: Record<string, unknown> = {};
     if (req.user?.role === "teacher") {
-      filter = "WHERE c.teacher_id = $1";
-      values.push(req.user.teacherId ?? -1);
+      match = { teacherId: currentTeacherId(req) };
     } else if (req.user?.role === "student") {
-      filter = "WHERE c.id = (SELECT s.class_id FROM students s WHERE s.id = $1 AND s.status = 'active')";
-      values.push(req.user.studentId ?? -1);
+      const student = await Student.findOne({ _id: currentStudentId(req), status: "active" }).select("classId").lean();
+      match = student?.classId ? { _id: student.classId } : NO_MATCH;
     }
-    const result = await pool.query<ClassRow>(`${classSelect} ${filter} ORDER BY c.name, c.section`, values);
-    res.json({ data: result.rows.map(presentClass) });
+    res.json({ data: (await loadClasses(match)).map(presentClass) });
   });
 
   router.post("/", requireRole("admin"), async (req, res) => {
-    const name = requireString(req.body?.name, "Class name", 80);
-    const section = req.body?.section ? requireString(req.body.section, "Section", 40) : "A";
-    const teacherId = req.body?.teacherId ? requirePositiveId(req.body.teacherId, "Teacher ID") : null;
-    if (teacherId !== null) await assertActiveTeacher(pool, teacherId);
-    const result = await pool.query<{ id: string }>("INSERT INTO classes(name, section, teacher_id) VALUES($1,$2,$3) RETURNING id", [name, section, teacherId]).catch((error: unknown) => {
-      if (uniqueError(error)) throw new ApiError(409, "That class and section already exist.", "DUPLICATE_RECORD");
-      if (foreignKeyError(error)) throw new ApiError(400, "The selected teacher does not exist.", "VALIDATION_ERROR");
-      throw error;
-    });
-    const row = await pool.query<ClassRow>(`${classSelect} WHERE c.id = $1`, [result.rows[0]?.id]);
-    res.status(201).json({ data: row.rows[0] ? presentClass(row.rows[0]) : null });
+    const created = await SchoolClass.create(await readBody(req.body)).catch(conflictOnDuplicate(DUPLICATE_MESSAGE));
+    res.status(201).json({ data: await loadClass(created._id) });
   });
 
   router.put("/:id", requireRole("admin"), async (req, res) => {
-    const id = requirePositiveId(req.params.id, "Class ID");
-    const name = requireString(req.body?.name, "Class name", 80);
-    const section = req.body?.section ? requireString(req.body.section, "Section", 40) : "A";
-    const teacherId = req.body?.teacherId ? requirePositiveId(req.body.teacherId, "Teacher ID") : null;
-    if (teacherId !== null) await assertActiveTeacher(pool, teacherId);
-    const result = await pool.query("UPDATE classes SET name=$1, section=$2, teacher_id=$3 WHERE id=$4", [name, section, teacherId, id]).catch((error: unknown) => {
-      if (uniqueError(error)) throw new ApiError(409, "That class and section already exist.", "DUPLICATE_RECORD");
-      if (foreignKeyError(error)) throw new ApiError(400, "The selected teacher does not exist.", "VALIDATION_ERROR");
-      throw error;
-    });
-    if (!result.rowCount) throw new ApiError(404, "Class was not found.", "NOT_FOUND");
-    const row = await pool.query<ClassRow>(`${classSelect} WHERE c.id = $1`, [id]);
-    res.json({ data: row.rows[0] ? presentClass(row.rows[0]) : null });
+    const id = requireObjectId(req.params.id, "Class ID");
+    const result = await SchoolClass.updateOne({ _id: id }, { $set: await readBody(req.body) }, { runValidators: true })
+      .catch(conflictOnDuplicate(DUPLICATE_MESSAGE));
+    if (!result.matchedCount) throw new ApiError(404, "Class was not found.", "NOT_FOUND");
+    res.json({ data: await loadClass(id) });
   });
 
   return router;
 }
-
-async function assertActiveTeacher(pool: Pool, teacherId: number): Promise<void> {
-  const teacher = await pool.query("SELECT 1 FROM teachers WHERE id=$1 AND status='active'", [teacherId]);
-  if (!teacher.rowCount) throw new ApiError(400, "The selected teacher is not active.", "VALIDATION_ERROR");
-}
-
-function uniqueError(error: unknown): boolean { return typeof error === "object" && error !== null && "code" in error && error.code === "23505"; }
-function foreignKeyError(error: unknown): boolean { return typeof error === "object" && error !== null && "code" in error && error.code === "23503"; }

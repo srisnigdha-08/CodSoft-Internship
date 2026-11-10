@@ -15,7 +15,7 @@ function requiredValue(name: string): string {
   if (!value || value.trim().length === 0) {
     throw new Error("Missing required environment variable: " + name + ". Set it in server/.env or the process environment.");
   }
-  return value;
+  return value.trim();
 }
 
 function readPort(name: string, fallback: number): number {
@@ -27,17 +27,23 @@ function readPort(name: string, fallback: number): number {
   return port;
 }
 
-export function getDatabaseConfig() {
-  return {
-    host: requiredValue("DB_HOST"),
-    port: readPort("DB_PORT", 5432),
-    database: requiredValue("DB_NAME"),
-    user: requiredValue("DB_USER"),
-    password: requiredValue("DB_PASSWORD"),
-    max: 10,
-    idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 3_000,
-  };
+/** Reads the database name from a MongoDB URI. The URI itself is never echoed because it can contain credentials. */
+export function databaseNameFromUri(uri: string, variableName: string): string {
+  const match = /^mongodb(?:\+srv)?:\/\/[^/]+\/([^?]+)/.exec(uri);
+  if (!match?.[1]) {
+    throw new Error(variableName + " must be a mongodb:// URI that names a database, for example mongodb://localhost:27017/codsoft_student_management.");
+  }
+  return decodeURIComponent(match[1]);
+}
+
+export function getMongoConfig() {
+  const uri = requiredValue("MONGODB_URI");
+  return { uri, databaseName: databaseNameFromUri(uri, "MONGODB_URI") };
+}
+
+export function getMongoTestConfig() {
+  const uri = requiredValue("MONGODB_TEST_URI");
+  return { uri, databaseName: databaseNameFromUri(uri, "MONGODB_TEST_URI") };
 }
 
 export function getServerConfig() {

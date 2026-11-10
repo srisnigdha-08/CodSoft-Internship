@@ -2,7 +2,7 @@
 
 ## Before recording
 
-1. Start PostgreSQL, apply migrations, and run the seed command as described in the README.
+1. Start MongoDB and run the seed command as described in the README.
 2. Start the Express server and Vite frontend in separate PowerShell windows.
 3. Open `http://localhost:5173` and sign in with the local administrator demo account.
 4. Use only sample data. Do not show a real student's name, contact details, or password.
@@ -11,9 +11,9 @@
 
 | Time | Screen and talking points |
 | --- | --- |
-| 0:00–0:20 | Introduce the CodSoft Task 1 Student Management System and the React, Express, TypeScript, and PostgreSQL stack. |
+| 0:00–0:20 | Introduce the CodSoft Task 1 Student Management System and the React, Express, TypeScript, and MongoDB stack. |
 | 0:20–0:45 | Sign in as the administrator. Point out that the session is an HttpOnly cookie and permissions are checked by the API. |
-| 0:45–1:10 | Show the dashboard. Explain that the counts and attendance summary come from PostgreSQL. |
+| 0:45–1:10 | Show the dashboard. Explain that the counts and attendance summary come from MongoDB. |
 | 1:10–1:45 | Open Students, search for a demo record, add a student, open the profile, edit a field, then deactivate the sample profile. Explain soft deactivation preserves history. |
 | 1:45–2:10 | Show Teachers and Classes. Explain teacher-to-class assignment and that teacher permissions are limited to assigned classes. |
 | 2:10–2:40 | Record one attendance value and show the duplicate-record response for the same student, class, and date. |

@@ -1,35 +1,45 @@
 import bcrypt from "bcryptjs";
+import { Types } from "mongoose";
 import request from "supertest";
-import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
+import { addDays, dayFromDate, today } from "../src/dates.js";
+import { Attendance, Exam, Payment, Result, SchoolClass, Student, Teacher, User } from "../src/models/index.js";
+import { closeTestDatabase, connectTestDatabase, countTestDocuments, createFixtures, resetTestData, type Fixtures } from "./testDb.js";
 
-interface FakeStudent {
-  id: string; user_id: string; email: string; first_name: string; last_name: string;
-  student_number: string; class_id: string | null; class_name: string | null; section: string | null;
-  date_of_birth: string | null; phone: string | null; address: string | null; status: "active" | "inactive"; created_at: Date;
-}
-
-interface FakeUser { id: string; email: string; password_hash: string; role: "admin" | "teacher" | "student" }
-
-const secret = "integration-test-secret-that-is-at-least-32-characters-long";
-let passwordHashes: Record<string, string>;
-let app: ReturnType<typeof createApp>;
-let state: ReturnType<typeof makeDatabase>["state"];
+const password = "Integration@12345";
+const missingId = "0123456789abcdef01234567";
+let passwordHash: string;
+let ids: Fixtures;
+const app = createApp({ jwtSecret: "isolated-integration-suite-secret-32-characters", frontendOrigin: "http://localhost:5173", secureCookie: false });
 
 beforeAll(async () => {
-  passwordHashes = {
-    admin: await bcrypt.hash("Admin@12345", 4),
-    teacher: await bcrypt.hash("Teacher@12345", 4),
-    student: await bcrypt.hash("Student@12345", 4),
-  };
+  await connectTestDatabase();
+  passwordHash = await bcrypt.hash(password, 4);
 });
 
-beforeEach(() => {
-  const database = makeDatabase(passwordHashes);
-  state = database.state;
-  app = createApp({ pool: database.pool, jwtSecret: secret, frontendOrigin: "http://localhost:5173", secureCookie: false });
+beforeEach(async () => {
+  await resetTestData();
+  ids = await createFixtures(passwordHash);
 });
+
+afterEach(async () => { await resetTestData(); });
+
+afterAll(async () => {
+  try { expect(await countTestDocuments()).toBe(0); } finally { await closeTestDatabase(); }
+});
+
+type Actor = "admin" | "teacher-a" | "teacher-b" | "student-a" | "student-b";
+
+async function login(role: Actor): Promise<string> {
+  const response = await request(app).post("/api/auth/login").send({ email: `${role}@integration.example.test`, password });
+  expect(response.status).toBe(200);
+  return String(response.headers["set-cookie"]?.[0] ?? "").split(";")[0] ?? "";
+}
+
+function studentBody(email = "new@integration.example.test") {
+  return { email, password, firstName: "New", lastName: "Student", studentNumber: "IT-S3", classId: ids.classA, dateOfBirth: "2011-02-10" };
+}
 
 describe("authentication and access control", () => {
   it("reports database connectivity through the health endpoint", async () => {
@@ -39,320 +49,396 @@ describe("authentication and access control", () => {
   });
 
   it("logs in and returns only safe user fields in an HttpOnly cookie session", async () => {
-    const response = await request(app).post("/api/auth/login").send({ email: "admin@school.local", password: "Admin@12345" });
-
+    const response = await request(app).post("/api/auth/login").send({ email: "admin@integration.example.test", password });
     expect(response.status).toBe(200);
-    expect(response.body.data.user).toEqual({ id: 1, email: "admin@school.local", role: "admin" });
-    expect(JSON.stringify(response.body)).not.toContain("password_hash");
+    expect(response.body.data.user).toEqual({ id: ids.admin, email: "admin@integration.example.test", role: "admin" });
+    expect(JSON.stringify(response.body).toLowerCase()).not.toContain("password");
     expect(response.headers["set-cookie"]?.[0]).toContain("HttpOnly");
     expect(response.headers["set-cookie"]?.[0]).toContain("SameSite=Strict");
   });
 
-  it("rejects an incorrect password", async () => {
-    const response = await request(app).post("/api/auth/login").send({ email: "admin@school.local", password: "wrong-password" });
-    expect(response.status).toBe(401);
-    expect(response.body.error.code).toBe("INVALID_CREDENTIALS");
+  it("links student and teacher sessions to their profiles", async () => {
+    const me = await request(app).get("/api/auth/me").set("Cookie", await login("student-a"));
+    expect(me.body.data.user).toMatchObject({ role: "student", studentId: ids.studentA });
+    const teacher = await request(app).get("/api/auth/me").set("Cookie", await login("teacher-a"));
+    expect(teacher.body.data.user).toMatchObject({ role: "teacher", teacherId: ids.teacherA });
+  });
+
+  it("rejects an incorrect password and clears the session on logout", async () => {
+    const wrong = await request(app).post("/api/auth/login").send({ email: "admin@integration.example.test", password: "wrong-password" });
+    expect(wrong.status).toBe(401);
+    expect(wrong.body.error.code).toBe("INVALID_CREDENTIALS");
+    const logout = await request(app).post("/api/auth/logout");
+    expect(logout.status).toBe(200);
+    expect(logout.headers["set-cookie"]?.[0]).toContain("Max-Age=0");
   });
 
   it("enforces a student's own-record boundary on student list and detail routes", async () => {
-    const cookie = await signIn("student@school.local", "Student@12345");
-    const list = await request(app).get("/api/students").set("Cookie", cookie);
-    const own = await request(app).get("/api/students/1").set("Cookie", cookie);
-    const other = await request(app).get("/api/students/2").set("Cookie", cookie);
-    const missingOther = await request(app).get("/api/students/999").set("Cookie", cookie);
-
-    expect(list.status).toBe(403);
+    const cookie = await login("student-a");
+    expect((await request(app).get("/api/students").set("Cookie", cookie)).status).toBe(403);
+    const own = await request(app).get(`/api/students/${ids.studentA}`).set("Cookie", cookie);
     expect(own.status).toBe(200);
-    expect(own.body.data.studentNumber).toBe("S-2026-001");
-    expect(other.status).toBe(403);
-    expect(missingOther.status).toBe(403);
+    expect(own.body.data.studentNumber).toBe("IT-S1");
+    expect((await request(app).get(`/api/students/${ids.studentB}`).set("Cookie", cookie)).status).toBe(403);
+    expect((await request(app).get(`/api/students/${missingId}`).set("Cookie", cookie)).status).toBe(403);
   });
 
   it("invalidates an existing cookie when its student profile is deactivated", async () => {
-    const cookie = await signIn("student@school.local", "Student@12345");
-    const student = state.students.find((item) => item.id === "1");
-    if (student) student.status = "inactive";
-
-    const response = await request(app).get("/api/students/1").set("Cookie", cookie);
+    const cookie = await login("student-a");
+    await Student.updateOne({ _id: ids.studentA }, { status: "inactive" });
+    const response = await request(app).get(`/api/students/${ids.studentA}`).set("Cookie", cookie);
     expect(response.status).toBe(401);
     expect(response.body.error.code).toBe("UNAUTHENTICATED");
   });
 
   it("does not expose a teacher profile to a student", async () => {
-    const cookie = await signIn("student@school.local", "Student@12345");
-    const response = await request(app).get("/api/teachers/1").set("Cookie", cookie);
+    const response = await request(app).get(`/api/teachers/${ids.teacherA}`).set("Cookie", await login("student-a"));
     expect(response.status).toBe(403);
     expect(response.body.error.code).toBe("FORBIDDEN");
   });
+
+  it("enforces role, ownership, class, origin, and manipulated-ID boundaries", async () => {
+    const admin = await login("admin");
+    const teacher = await login("teacher-a");
+    const student = await login("student-a");
+    expect((await request(app).get("/api/students")).status).toBe(401);
+    expect((await request(app).get("/api/students").set("Cookie", student)).status).toBe(403);
+    expect((await request(app).get(`/api/students/${ids.studentB}`).set("Cookie", student)).status).toBe(403);
+    expect((await request(app).get(`/api/students/${ids.studentB}`).set("Cookie", teacher)).status).toBe(403);
+    expect((await request(app).get(`/api/students/${ids.studentA}`).set("Cookie", teacher)).status).toBe(200);
+    expect((await request(app).get(`/api/teachers/${ids.teacherB}`).set("Cookie", teacher)).status).toBe(403);
+    expect((await request(app).get(`/api/teachers/${ids.teacherA}`).set("Cookie", student)).status).toBe(403);
+    expect((await request(app).get("/api/fees").set("Cookie", teacher)).status).toBe(403);
+    expect((await request(app).get("/api/payments").set("Cookie", teacher)).status).toBe(403);
+    expect((await request(app).get(`/api/fees/${ids.feeA}/payments`).set("Cookie", student)).status).toBe(200);
+    const foreignFee = await request(app).post("/api/fees").set("Cookie", admin)
+      .send({ studentId: ids.studentB, description: "Other fee", academicYear: "2026-27", amount: 200, dueDate: "2026-12-01" });
+    const foreign = await request(app).get(`/api/fees/${foreignFee.body.data.id}/payments`).set("Cookie", student);
+    const missing = await request(app).get(`/api/fees/${missingId}/payments`).set("Cookie", student);
+    expect(foreign.status).toBe(403);
+    expect(foreign.body.error).toEqual(missing.body.error);
+    expect((await request(app).post("/api/attendance").set("Cookie", teacher).send({ studentId: ids.studentB, classId: ids.classB, date: "2026-10-15", status: "present" })).status).toBe(403);
+    expect((await request(app).post("/api/fees").set("Cookie", student).send({})).status).toBe(403);
+    expect((await request(app).post("/api/classes").set("Cookie", teacher).send({ name: "X" })).status).toBe(403);
+    expect((await request(app).post("/api/auth/login").set("Origin", "https://untrusted.example.test").send({ email: "admin@integration.example.test", password })).status).toBe(403);
+  });
+
+  it("scopes classes to the assigned teacher and enrolled student", async () => {
+    const teacher = await request(app).get("/api/classes").set("Cookie", await login("teacher-a"));
+    expect(teacher.body.data.map((item: { id: string }) => item.id)).toEqual([ids.classA]);
+    const student = await request(app).get("/api/classes").set("Cookie", await login("student-b"));
+    expect(student.body.data.map((item: { id: string }) => item.id)).toEqual([ids.classB]);
+    const admin = await request(app).get("/api/classes").set("Cookie", await login("admin"));
+    expect(admin.body.data).toHaveLength(2);
+    expect(admin.body.data[0]).toMatchObject({ section: "A", teacherId: ids.teacherA, teacherName: "Test Teacher A", studentCount: 1 });
+  });
 });
 
-describe("student management", () => {
-  it("creates, retrieves, updates, and deactivates a student", async () => {
-    const cookie = await signIn("admin@school.local", "Admin@12345");
-    const created = await request(app).post("/api/students").set("Cookie", cookie).send({
-      email: "new.student@school.local", password: "NewStudent@123", firstName: "Sam", lastName: "Rivera",
-      studentNumber: "S-2026-010", classId: 1, dateOfBirth: "2011-02-10", phone: "555-0120", address: "7 Example Way, Demo Borough",
-    });
+describe("students", () => {
+  it("creates, reads, edits, and deactivates a student without accepting mass-assigned fields", async () => {
+    const cookie = await login("admin");
+    const created = await request(app).post("/api/students").set("Cookie", cookie)
+      .send({ ...studentBody(), role: "admin", status: "inactive", userId: ids.admin, passwordHash: "forged", address: "7 Example Way" });
     expect(created.status).toBe(201);
-    expect(created.body.data.email).toBe("new.student@school.local");
-    expect(created.body.data.studentNumber).toBe("S-2026-010");
-    expect(created.body.data.address).toBe("7 Example Way, Demo Borough");
+    expect(created.body.data).toMatchObject({ email: "new@integration.example.test", status: "active", studentNumber: "IT-S3", dateOfBirth: "2011-02-10", address: "7 Example Way", className: "Integration Grade", section: "A" });
+    expect(JSON.stringify(created.body).toLowerCase()).not.toContain("passwordhash");
+    const studentId = String(created.body.data.id);
+    expect((await User.findOne({ email: "new@integration.example.test" }).lean())?.role).toBe("student");
 
-    const id = created.body.data.id as number;
-    const retrieved = await request(app).get(`/api/students/${id}`).set("Cookie", cookie);
-    expect(retrieved.status).toBe(200);
-    expect(retrieved.body.data.firstName).toBe("Sam");
-
-    const updated = await request(app).put(`/api/students/${id}`).set("Cookie", cookie).send({
-      email: "sam.rivera@school.local", firstName: "Samuel", lastName: "Rivera", studentNumber: "S-2026-010",
-      classId: 1, dateOfBirth: "2011-02-10", phone: "555-0121", address: "8 Example Way, Demo Borough",
-    });
+    expect((await request(app).get(`/api/students/${studentId}`).set("Cookie", cookie)).status).toBe(200);
+    const updated = await request(app).put(`/api/students/${studentId}`).set("Cookie", cookie)
+      .send({ ...studentBody("edited@integration.example.test"), firstName: "Edited", status: "inactive" });
     expect(updated.status).toBe(200);
-    expect(updated.body.data.firstName).toBe("Samuel");
-    expect(updated.body.data.email).toBe("sam.rivera@school.local");
-    expect(updated.body.data.address).toBe("8 Example Way, Demo Borough");
+    expect(updated.body.data).toMatchObject({ email: "edited@integration.example.test", firstName: "Edited", status: "active" });
+    expect((await User.findOne({ email: "edited@integration.example.test" }).lean())?.name).toBe("Edited Student");
 
-    const removed = await request(app).delete(`/api/students/${id}`).set("Cookie", cookie);
+    const removed = await request(app).delete(`/api/students/${studentId}`).set("Cookie", cookie);
     expect(removed.status).toBe(200);
     expect(removed.body.data.status).toBe("inactive");
-    expect(state.students.find((student) => student.id === String(id))?.status).toBe("inactive");
+    const inactive = await request(app).get(`/api/students/${studentId}`).set("Cookie", cookie);
+    expect(inactive.body.data.status).toBe("inactive");
+    expect((await request(app).post("/api/auth/login").send({ email: "edited@integration.example.test", password })).status).toBe(401);
   });
 
-  it("rejects duplicate email, invalid input, and missing students", async () => {
-    const cookie = await signIn("admin@school.local", "Admin@12345");
-    const duplicate = await request(app).post("/api/students").set("Cookie", cookie).send({
-      email: "admin@school.local", password: "ValidPassword@123", firstName: "A", lastName: "B", studentNumber: "S-2026-020",
+  it("rejects duplicate and invalid students and undoes a failed account creation", async () => {
+    const cookie = await login("admin");
+    const duplicateNumber = await request(app).post("/api/students").set("Cookie", cookie)
+      .send({ ...studentBody("rolled-back@integration.example.test"), studentNumber: "IT-S1" });
+    expect(duplicateNumber.status).toBe(409);
+    expect(await User.exists({ email: "rolled-back@integration.example.test" })).toBeNull();
+    const duplicateEmail = await request(app).post("/api/students").set("Cookie", cookie).send(studentBody("student-a@integration.example.test"));
+    expect(duplicateEmail.status).toBe(409);
+    expect(duplicateEmail.body.error.code).toBe("DUPLICATE_RECORD");
+    expect((await request(app).post("/api/students").set("Cookie", cookie).send(studentBody("bad-email"))).status).toBe(400);
+    expect((await request(app).post("/api/students").set("Cookie", cookie).send({ ...studentBody(), classId: missingId })).status).toBe(400);
+    expect((await request(app).get(`/api/students/${missingId}`).set("Cookie", cookie)).status).toBe(404);
+    expect((await request(app).get("/api/students/1%20OR%201=1").set("Cookie", cookie)).status).toBe(400);
+  });
+
+  it("keeps the old email when a profile edit conflicts", async () => {
+    const cookie = await login("admin");
+    const response = await request(app).put(`/api/students/${ids.studentA}`).set("Cookie", cookie)
+      .send({ ...studentBody("changed@integration.example.test"), studentNumber: "IT-S2" });
+    expect(response.status).toBe(409);
+    expect(await User.exists({ email: "student-a@integration.example.test" })).not.toBeNull();
+    expect(await User.exists({ email: "changed@integration.example.test" })).toBeNull();
+  });
+
+  it("searches, filters, sorts, and paginates on the server", async () => {
+    const cookie = await login("admin");
+    const byEmail = await request(app).get("/api/students?search=student-b").set("Cookie", cookie);
+    expect(byEmail.body.data.map((item: { id: string }) => item.id)).toEqual([ids.studentB]);
+    const byClass = await request(app).get(`/api/students?classId=${ids.classA}`).set("Cookie", cookie);
+    expect(byClass.body.meta.total).toBe(1);
+    const sorted = await request(app).get("/api/students?sortBy=studentNumber&sortOrder=desc&limit=1&page=2").set("Cookie", cookie);
+    expect(sorted.body.data[0].studentNumber).toBe("IT-S1");
+    expect(sorted.body.meta).toEqual({ page: 2, limit: 1, total: 2, pages: 2 });
+    const byClassName = await request(app).get("/api/students?sortBy=class&sortOrder=asc").set("Cookie", cookie);
+    expect(byClassName.body.meta.total).toBe(2);
+    expect((await request(app).get("/api/students?limit=51").set("Cookie", cookie)).status).toBe(400);
+    const teacherView = await request(app).get("/api/students").set("Cookie", await login("teacher-a"));
+    expect(teacherView.body.data.map((item: { id: string }) => item.id)).toEqual([ids.studentA]);
+  });
+});
+
+describe("teachers and classes", () => {
+  it("manages teachers and classes with active-assignment validation", async () => {
+    const cookie = await login("admin");
+    const teacher = await request(app).post("/api/teachers").set("Cookie", cookie).send({
+      email: "new-teacher@integration.example.test", password, firstName: "New", lastName: "Teacher", employeeNumber: "IT-T3", subject: "History", role: "admin",
     });
-    const invalid = await request(app).post("/api/students").set("Cookie", cookie).send({ email: "not-an-email" });
-    const missing = await request(app).get("/api/students/999").set("Cookie", cookie);
+    expect(teacher.status).toBe(201);
+    const teacherId = String(teacher.body.data.id);
+    expect((await User.findOne({ email: "new-teacher@integration.example.test" }).lean())?.role).toBe("teacher");
+    const updated = await request(app).put(`/api/teachers/${teacherId}`).set("Cookie", cookie).send({
+      email: "new-teacher@integration.example.test", firstName: "Edited", lastName: "Teacher", employeeNumber: "IT-T3", subject: "Geography",
+    });
+    expect(updated.body.data).toMatchObject({ firstName: "Edited", subject: "Geography" });
+    const search = await request(app).get("/api/teachers?search=geogra").set("Cookie", cookie);
+    expect(search.body.data.map((item: { id: string }) => item.id)).toEqual([teacherId]);
+    const own = await request(app).get("/api/teachers").set("Cookie", await login("teacher-a"));
+    expect(own.body.data.map((item: { id: string }) => item.id)).toEqual([ids.teacherA]);
 
-    expect(duplicate.status).toBe(409);
-    expect(duplicate.body.error.code).toBe("DUPLICATE_RECORD");
-    expect(invalid.status).toBe(400);
-    expect(missing.status).toBe(404);
+    const createdClass = await request(app).post("/api/classes").set("Cookie", cookie).send({ name: "Integration Grade", section: "C", teacherId });
+    expect(createdClass.status).toBe(201);
+    const classId = String(createdClass.body.data.id);
+    const reassigned = await request(app).put(`/api/classes/${classId}`).set("Cookie", cookie).send({ name: "Integration Grade", section: "C", teacherId: ids.teacherA });
+    expect(reassigned.body.data.teacherId).toBe(ids.teacherA);
+    expect((await request(app).delete(`/api/teachers/${teacherId}`).set("Cookie", cookie)).status).toBe(200);
+    expect((await request(app).put(`/api/classes/${classId}`).set("Cookie", cookie).send({ name: "Integration Grade", section: "C", teacherId })).status).toBe(400);
+    expect((await request(app).post("/api/classes").set("Cookie", cookie).send({ name: "Integration Grade", section: "A" })).status).toBe(409);
+    expect((await request(app).put(`/api/classes/${missingId}`).set("Cookie", cookie).send({ name: "Nope" })).status).toBe(404);
+  });
+
+  it("shows a class as unassigned when its teacher is inactive", async () => {
+    await Teacher.updateOne({ _id: ids.teacherA }, { status: "inactive" });
+    const response = await request(app).get("/api/classes").set("Cookie", await login("admin"));
+    const classA = response.body.data.find((item: { id: string }) => item.id === ids.classA);
+    expect(classA).toMatchObject({ teacherId: null, teacherName: null });
   });
 });
 
-describe("class assignments", () => {
-  it("rejects assignment to an inactive teacher", async () => {
-    const cookie = await signIn("admin@school.local", "Admin@12345");
-    const response = await request(app).post("/api/classes").set("Cookie", cookie).send({ name: "Grade 11", section: "A", teacherId: 999 });
-    expect(response.status).toBe(400);
-    expect(response.body.error.code).toBe("VALIDATION_ERROR");
-  });
-});
-
-describe("attendance, academic results, and fee records", () => {
-  it("records attendance once per student, class, and date", async () => {
-    const cookie = await signIn("admin@school.local", "Admin@12345");
-    const body = { studentId: 1, classId: 1, date: "2026-10-14", status: "present" };
-    const first = await request(app).post("/api/attendance").set("Cookie", cookie).send(body);
-    const duplicate = await request(app).post("/api/attendance").set("Cookie", cookie).send(body);
-
+describe("attendance and corrections", () => {
+  it("records, corrects, filters, and totals attendance with class-scoped teacher updates", async () => {
+    const admin = await login("admin");
+    const teacher = await login("teacher-a");
+    const date = dayFromDate(today());
+    const bodyA = { studentId: ids.studentA, classId: ids.classA, date, status: "present" };
+    const first = await request(app).post("/api/attendance").set("Cookie", admin).send(bodyA);
     expect(first.status).toBe(201);
-    expect(first.body.data.status).toBe("present");
-    expect(duplicate.status).toBe(409);
+    expect(first.body.data).toMatchObject({ studentName: "Test Student A", className: "Integration Grade", date });
+    expect((await request(app).post("/api/attendance").set("Cookie", admin).send(bodyA)).status).toBe(409);
+    const second = await request(app).post("/api/attendance").set("Cookie", admin).send({ studentId: ids.studentB, classId: ids.classB, date, status: "absent" });
+    expect(second.status).toBe(201);
+
+    const corrected = await request(app).put(`/api/attendance/${first.body.data.id}`).set("Cookie", teacher).send({ status: "late", studentId: ids.studentB, classId: ids.classB });
+    expect(corrected.status).toBe(200);
+    expect(corrected.body.data).toMatchObject({ status: "late", studentId: ids.studentA, classId: ids.classA });
+
+    const history = await request(app).get(`/api/attendance/${first.body.data.id}/corrections`).set("Cookie", teacher);
+    expect(history.status).toBe(200);
+    expect(history.body.data).toHaveLength(1);
+    expect(history.body.data[0]).toMatchObject({ attendanceId: first.body.data.id, previousStatus: "present", newStatus: "late", correctedBy: ids.teacherUserA });
+    expect(new Date(history.body.data[0].correctedAt).getTime()).toBeGreaterThan(0);
+
+    const stored = await Attendance.findById(first.body.data.id).lean();
+    expect(stored?.status).toBe("late");
+    expect(stored?.corrections).toHaveLength(1);
+    expect((await request(app).put(`/api/attendance/${first.body.data.id}`).set("Cookie", teacher).send({ status: "late" })).status).toBe(400);
+    expect((await Attendance.findById(first.body.data.id).lean())?.corrections).toHaveLength(1);
+
+    expect((await request(app).put(`/api/attendance/${second.body.data.id}`).set("Cookie", teacher).send({ status: "present" })).status).toBe(403);
+    expect((await request(app).get(`/api/attendance/${second.body.data.id}/corrections`).set("Cookie", teacher)).status).toBe(403);
+    expect((await request(app).get(`/api/attendance/${first.body.data.id}/corrections`).set("Cookie", await login("student-a"))).status).toBe(403);
+    expect((await request(app).get(`/api/attendance/${missingId}/corrections`).set("Cookie", admin)).status).toBe(404);
+    expect((await request(app).get("/api/attendance/1%20OR%201=1/corrections").set("Cookie", admin)).status).toBe(400);
+    expect((await request(app).delete(`/api/attendance/${first.body.data.id}/corrections`).set("Cookie", admin)).status).toBe(404);
+    expect((await request(app).put(`/api/attendance/${first.body.data.id}`).set("Cookie", teacher).send({ status: "invalid" })).status).toBe(400);
+
+    const listing = await request(app).get(`/api/attendance?date=${date}`).set("Cookie", admin);
+    expect(listing.status).toBe(200);
+    expect(listing.body.meta).toEqual({ summary: { present: 0, absent: 1, late: 1 }, total: 2 });
+    const teacherListing = await request(app).get("/api/attendance").set("Cookie", teacher);
+    expect(teacherListing.body.meta.total).toBe(1);
+    const studentListing = await request(app).get("/api/attendance").set("Cookie", await login("student-b"));
+    expect(studentListing.body.data.map((row: { id: string }) => row.id)).toEqual([second.body.data.id]);
   });
 
-  it("rejects an academic score above the examination maximum", async () => {
-    const cookie = await signIn("admin@school.local", "Admin@12345");
-    const response = await request(app).post("/api/academics/results").set("Cookie", cookie).send({ examinationId: 1, studentId: 1, score: 101 });
-    expect(response.status).toBe(400);
-    expect(response.body.error.message).toContain("greater than the examination maximum");
-  });
-
-  it("rejects blank or nonnumeric marks and payment amounts", async () => {
-    const cookie = await signIn("admin@school.local", "Admin@12345");
-    const blankScore = await request(app).post("/api/academics/results").set("Cookie", cookie).send({ examinationId: 1, studentId: 1, score: "" });
-    const booleanPayment = await request(app).post("/api/fees/1/payments").set("Cookie", cookie).send({ amount: true });
-    expect(blankScore.status).toBe(400);
-    expect(booleanPayment.status).toBe(400);
-  });
-
-  it("paginates academic results with a full matching count", async () => {
-    const cookie = await signIn("admin@school.local", "Admin@12345");
-    const response = await request(app).get("/api/academics/results?page=2").set("Cookie", cookie);
-    expect(response.status).toBe(200);
-    expect(response.body.meta).toEqual({ page: 2, limit: 50, total: 450, pages: 9 });
-    expect(response.body.data[0].date).toBe("2026-10-08");
-  });
-
-  it("reports attendance totals across the full filtered set, beyond the displayed 200 rows", async () => {
-    for (let index = 0; index < 201; index += 1) {
-      state.attendance.push({ id: String(index + 1), student_id: "1", class_id: "1", attendance_date: "2026-10-14", status: index === 200 ? "absent" : "present" });
-    }
-    const cookie = await signIn("admin@school.local", "Admin@12345");
-    const response = await request(app).get("/api/attendance").set("Cookie", cookie);
+  it("reports totals across the full filtered set, beyond the displayed 200 rows", async () => {
+    await Attendance.insertMany(Array.from({ length: 201 }, (_, index) => ({
+      studentId: ids.studentA, classId: ids.classA, date: addDays(new Date("2026-01-01T00:00:00Z"), index), status: index === 200 ? "absent" : "present", recordedBy: ids.admin,
+    })));
+    const response = await request(app).get("/api/attendance").set("Cookie", await login("admin"));
     expect(response.status).toBe(200);
     expect(response.body.data).toHaveLength(200);
+    expect(response.body.data[0].status).toBe("absent");
     expect(response.body.meta).toEqual({ summary: { present: 200, absent: 1, late: 0 }, total: 201 });
   });
 
-  it("calculates fee balances and rejects a payment above the balance", async () => {
-    const cookie = await signIn("admin@school.local", "Admin@12345");
-    const records = await request(app).get("/api/fees").set("Cookie", cookie);
-    const excessive = await request(app).post("/api/fees/1/payments").set("Cookie", cookie).send({ amount: 800 });
+  it("rejects attendance for a student outside the class", async () => {
+    const response = await request(app).post("/api/attendance").set("Cookie", await login("admin"))
+      .send({ studentId: ids.studentB, classId: ids.classA, date: "2026-10-15", status: "present" });
+    expect(response.status).toBe(400);
+  });
+});
 
-    expect(records.status).toBe(200);
-    expect(records.body.data[0]).toMatchObject({ amount: 1000, amountPaid: 250, balance: 750, status: "partially paid" });
-    expect(records.body.meta).toEqual({ total: 1, summary: { obligations: 1000, collected: 250, outstanding: 750 } });
-    expect(excessive.status).toBe(400);
-    expect(excessive.body.error.message).toContain("outstanding balance");
+describe("examinations and results", () => {
+  it("validates examinations and results and scopes them to students and teachers", async () => {
+    const admin = await login("admin");
+    const teacherA = await login("teacher-a");
+    const exam = await request(app).post("/api/academics/examinations").set("Cookie", admin).send({ title: "Integration exam", classId: ids.classA, date: "2026-10-15", maxScore: 100 });
+    expect(exam.status).toBe(201);
+    expect(exam.body.data).toMatchObject({ className: "Integration Grade", section: "A", date: "2026-10-15", maxScore: 100 });
+    const examinationId = String(exam.body.data.id);
+    expect((await request(app).post("/api/academics/examinations").set("Cookie", admin).send({ title: "Integration exam", classId: ids.classA, date: "2026-10-15", maxScore: 100 })).status).toBe(409);
+    expect((await request(app).post("/api/academics/examinations").set("Cookie", await login("teacher-b")).send({ title: "Foreign", classId: ids.classA, date: "2026-10-15", maxScore: 100 })).status).toBe(403);
+    expect((await request(app).post("/api/academics/examinations").set("Cookie", admin).send({ title: "No class", classId: missingId, date: "2026-10-15", maxScore: 100 })).status).toBe(400);
+
+    const result = await request(app).post("/api/academics/results").set("Cookie", teacherA).send({ examinationId, studentId: ids.studentA, score: 85 });
+    expect(result.status).toBe(201);
+    expect(result.body.data).toMatchObject({ examination: "Integration exam", studentName: "Test Student A", className: "Integration Grade", score: 85, maxScore: 100, date: "2026-10-15" });
+    expect((await request(app).post("/api/academics/results").set("Cookie", teacherA).send({ examinationId, studentId: ids.studentA, score: 85 })).status).toBe(409);
+    const over = await request(app).post("/api/academics/results").set("Cookie", admin).send({ examinationId, studentId: ids.studentA, score: 101 });
+    expect(over.status).toBe(400);
+    expect(over.body.error.message).toContain("greater than the examination maximum");
+    expect((await request(app).post("/api/academics/results").set("Cookie", admin).send({ examinationId, studentId: ids.studentB, score: 85 })).status).toBe(400);
+    expect((await request(app).post("/api/academics/results").set("Cookie", admin).send({ examinationId, studentId: ids.studentA, score: "" })).status).toBe(400);
+    expect((await request(app).post("/api/academics/results").set("Cookie", admin).send({ examinationId: missingId, studentId: ids.studentA, score: 1 })).status).toBe(404);
+
+    expect((await request(app).get("/api/academics/results").set("Cookie", await login("student-a"))).body.meta.total).toBe(1);
+    expect((await request(app).get("/api/academics/results").set("Cookie", await login("student-b"))).body.meta.total).toBe(0);
+    expect((await request(app).get("/api/academics/results").set("Cookie", await login("teacher-b"))).body.meta.total).toBe(0);
+    expect((await request(app).get("/api/academics/examinations").set("Cookie", await login("student-b"))).body.data).toHaveLength(0);
+  });
+
+  it("paginates academic results with a full matching count", async () => {
+    const admin = await login("admin");
+    const exam = await request(app).post("/api/academics/examinations").set("Cookie", admin).send({ title: "Pagination exam", classId: ids.classA, date: "2026-10-15", maxScore: 100 });
+    const users = await User.insertMany(Array.from({ length: 51 }, (_, index) => ({ email: `page-${index}@integration.example.test`, passwordHash, role: "student", name: "Test Pagination" })));
+    const students = await Student.insertMany(users.map((user, index) => ({ userId: user._id, firstName: "Test", lastName: "Pagination", studentNumber: `PAGE-${index}`, classId: ids.classA })));
+    await Result.insertMany(students.map((student) => ({ studentId: student._id, examId: exam.body.data.id, score: 75, recordedBy: ids.admin })));
+    const first = await request(app).get("/api/academics/results?page=1").set("Cookie", admin);
+    const second = await request(app).get("/api/academics/results?page=2").set("Cookie", admin);
+    expect(first.body.data).toHaveLength(50);
+    expect(second.body.data).toHaveLength(1);
+    expect(second.body.meta).toEqual({ page: 2, limit: 50, total: 51, pages: 2 });
+  });
+});
+
+describe("fees and payments", () => {
+  it("creates fees, records payments, and calculates balances and history", async () => {
+    const admin = await login("admin");
+    const student = await login("student-a");
+    const created = await request(app).post("/api/fees").set("Cookie", admin).send({ studentId: ids.studentA, description: "Lab fee", academicYear: "2026-27", amount: 300, dueDate: "2026-12-02" });
+    expect(created.status).toBe(201);
+    expect(created.body.data).toMatchObject({ amount: 300, amountPaid: 0, balance: 300, status: "pending", dueDate: "2026-12-02" });
+    const feeId = String(created.body.data.id);
+
+    const payment = await request(app).post(`/api/fees/${feeId}/payments`).set("Cookie", admin).send({ amount: 120, referenceCode: "IT-PAY-1" });
+    expect(payment.status).toBe(201);
+    expect(payment.body.data).toMatchObject({ feeRecordId: feeId, amount: 120, referenceCode: "IT-PAY-1" });
+
+    const ledger = await request(app).get("/api/fees").set("Cookie", admin);
+    expect(ledger.body.data.find((fee: { id: string }) => fee.id === feeId)).toMatchObject({ amount: 300, amountPaid: 120, balance: 180, status: "partially paid" });
+    expect(ledger.body.meta).toEqual({ total: 2, summary: { obligations: 1300, collected: 120, outstanding: 1180 } });
+
+    const history = await request(app).get(`/api/fees/${feeId}/payments`).set("Cookie", student);
+    expect(history.status).toBe(200);
+    expect(history.body.data[0]).toMatchObject({ amount: 120, referenceCode: "IT-PAY-1" });
+
+    const over = await request(app).post(`/api/fees/${feeId}/payments`).set("Cookie", admin).send({ amount: 190, referenceCode: "IT-PAY-2" });
+    expect(over.status).toBe(400);
+    expect(over.body.error.message).toContain("outstanding balance");
+    expect((await request(app).post(`/api/fees/${feeId}/payments`).set("Cookie", admin).send({ amount: 1, referenceCode: "IT-PAY-1" })).status).toBe(409);
+    const paidOff = await request(app).post(`/api/fees/${feeId}/payments`).set("Cookie", admin).send({ amount: 180 });
+    expect(paidOff.status).toBe(201);
+    const after = await request(app).get(`/api/fees?studentId=${ids.studentA}`).set("Cookie", admin);
+    expect(after.body.data.find((fee: { id: string }) => fee.id === feeId)).toMatchObject({ balance: 0, status: "paid" });
+    expect((await request(app).post(`/api/fees/${feeId}/payments`).set("Cookie", student).send({ amount: 1 })).status).toBe(403);
+  });
+
+  it("lists payments only for the people allowed to see them", async () => {
+    const admin = await login("admin");
+    await request(app).post(`/api/fees/${ids.feeA}/payments`).set("Cookie", admin).send({ amount: 10, referenceCode: "IT-LIST" });
+    const all = await request(app).get("/api/payments").set("Cookie", admin);
+    expect(all.body.meta).toEqual({ page: 1, limit: 50, total: 1, pages: 1 });
+    expect(all.body.data[0]).toMatchObject({ amount: 10, feeRecordId: ids.feeA, studentId: ids.studentA });
+    expect((await request(app).get("/api/payments").set("Cookie", await login("student-a"))).body.meta.total).toBe(1);
+    expect((await request(app).get("/api/payments").set("Cookie", await login("student-b"))).body.meta.total).toBe(0);
+    expect((await request(app).get(`/api/payments?studentId=${ids.studentB}`).set("Cookie", admin)).body.meta.total).toBe(0);
   });
 
   it("does not reveal another fee record's existence to a student", async () => {
-    const cookie = await signIn("student@school.local", "Student@12345");
-    const own = await request(app).get("/api/fees/1/payments").set("Cookie", cookie);
-    const foreign = await request(app).get("/api/fees/2/payments").set("Cookie", cookie);
-    const missing = await request(app).get("/api/fees/999/payments").set("Cookie", cookie);
-    expect(own.status).toBe(200);
+    const cookie = await login("student-b");
+    const foreign = await request(app).get(`/api/fees/${ids.feeA}/payments`).set("Cookie", cookie);
+    const missing = await request(app).get(`/api/fees/${missingId}/payments`).set("Cookie", cookie);
     expect(foreign.status).toBe(403);
     expect(missing.status).toBe(403);
     expect(foreign.body.error).toEqual(missing.body.error);
   });
 });
 
-async function signIn(email: string, password: string): Promise<string> {
-  const response = await request(app).post("/api/auth/login").send({ email, password });
-  if (response.status !== 200) throw new Error(`Test sign-in failed for ${email}`);
-  const cookie = response.headers["set-cookie"]?.[0];
-  if (!cookie) throw new Error("Test sign-in did not return a session cookie.");
-  return cookie.split(";")[0] ?? "";
-}
+describe("dashboard", () => {
+  it("matches dashboard aggregates to the underlying database", async () => {
+    const admin = await login("admin");
+    const teacher = await login("teacher-a");
+    const date = dayFromDate(today());
+    await request(app).post("/api/attendance").set("Cookie", admin).send({ studentId: ids.studentA, classId: ids.classA, date, status: "present" });
+    await request(app).post("/api/attendance").set("Cookie", admin).send({ studentId: ids.studentB, classId: ids.classB, date, status: "absent" });
+    const exam = await request(app).post("/api/academics/examinations").set("Cookie", admin).send({ title: "Dashboard exam", classId: ids.classA, date, maxScore: 100 });
+    await request(app).post("/api/academics/results").set("Cookie", admin).send({ examinationId: exam.body.data.id, studentId: ids.studentA, score: 85 });
+    await request(app).post(`/api/fees/${ids.feeA}/payments`).set("Cookie", admin).send({ amount: 250, referenceCode: "IT-DASHBOARD" });
 
-function makeDatabase(hashes: Record<string, string>) {
-  const hashFor = (role: "admin" | "teacher" | "student") => {
-    const hash = hashes[role];
-    if (!hash) throw new Error(`Missing ${role} password hash in test fixture.`);
-    return hash;
-  };
-  const users: FakeUser[] = [
-    { id: "1", email: "admin@school.local", password_hash: hashFor("admin"), role: "admin" },
-    { id: "2", email: "teacher@school.local", password_hash: hashFor("teacher"), role: "teacher" },
-    { id: "3", email: "student@school.local", password_hash: hashFor("student"), role: "student" },
-  ];
-  const students: FakeStudent[] = [
-    { id: "1", user_id: "3", email: "student@school.local", first_name: "Jordan", last_name: "Lee", student_number: "S-2026-001", class_id: "1", class_name: "Grade 10", section: "A", date_of_birth: "2010-04-12", phone: "555-0102", address: null, status: "active", created_at: new Date("2026-10-01T00:00:00Z") },
-    { id: "2", user_id: "99", email: "another.student@school.local", first_name: "Taylor", last_name: "Chen", student_number: "S-2026-002", class_id: "1", class_name: "Grade 10", section: "A", date_of_birth: null, phone: null, address: null, status: "active", created_at: new Date("2026-10-02T00:00:00Z") },
-  ];
-  const state = {
-    users,
-    students,
-    attendance: [] as Array<Record<string, unknown>>,
-    payments: [{ fee_record_id: "1", amount: 250 }],
-    nextUserId: 4,
-    nextStudentId: 3,
-    nextAttendanceId: 1,
-  };
+    const stats = await request(app).get("/api/dashboard/stats").set("Cookie", admin);
+    expect(stats.status).toBe(200);
+    expect(stats.body.data.summary).toMatchObject({ totalStudents: 2, totalTeachers: 2, attendance: { present: 1, absent: 1, late: 0, total: 2, percentage: 50 } });
+    expect(stats.body.data.academics).toMatchObject({ resultCount: 1, averagePercentage: 85, gradeBands: { strong: 1, steady: 0, support: 0 } });
+    expect(stats.body.data.fees).toEqual({ obligations: 1000, collected: 250, outstanding: 750 });
+    expect(stats.body.data.recentStudents).toHaveLength(2);
+    expect(stats.body.data.attendanceTrend).toHaveLength(14);
+    expect(stats.body.data.attendanceTrend.at(-1)).toMatchObject({ date, present: 1, absent: 1, total: 2, percentage: 50 });
+    expect(stats.body.data.attendanceTrend[0]).toMatchObject({ total: 0, percentage: 0 });
 
-  async function query<T extends QueryResultRow = QueryResultRow>(rawSql: string, rawValues: unknown[] = []): Promise<QueryResult<T>> {
-    const sql = rawSql.replace(/\s+/g, " ").trim().toLowerCase();
-    const values = rawValues;
-    const rows = <R>(items: R[], rowCount = items.length) => ({ rows: items, rowCount, command: "SELECT", oid: 0, fields: [] }) as unknown as QueryResult<T>;
-    const pgError = (code: string) => Object.assign(new Error("database constraint"), { code });
-    if (["begin", "commit", "rollback"].includes(sql)) return rows([]);
+    expect(await Student.countDocuments({ status: "active" })).toBe(2);
+    expect(await Attendance.countDocuments()).toBe(2);
+    expect((await Payment.find().lean()).reduce((total, payment) => total + payment.amountCents, 0)).toBe(25_000);
+    expect(await Exam.countDocuments()).toBe(1);
 
-    if (sql.startsWith("select u.id,u.email,u.role,s.id as student_id,t.id as teacher_id")) {
-      const user = state.users.find((item) => item.id === String(values[0]) && item.email === values[1] && item.role === values[2]);
-      if (!user) return rows([]);
-      const student = state.students.find((item) => item.user_id === user.id && item.status === "active");
-      const teacherId = user.role === "teacher" ? "1" : null;
-      if ((user.role === "student" && !student) || (user.role === "teacher" && !teacherId)) return rows([]);
-      return rows([{ id: user.id, email: user.email, role: user.role, student_id: student?.id ?? null, teacher_id: teacherId }]);
-    }
-    if (sql.startsWith("select u.id, u.email, u.password_hash")) {
-      const user = state.users.find((item) => item.email === values[0]);
-      if (!user) return rows([]);
-      const student = state.students.find((item) => item.user_id === user.id && item.status === "active");
-      const teacherId = user.role === "teacher" ? "1" : null;
-      if (user.role === "student" && !student) return rows([]);
-      return rows([{ id: user.id, email: user.email, password_hash: user.password_hash, role: user.role, student_id: student?.id ?? null, teacher_id: teacherId }]);
-    }
-    if (sql.startsWith("insert into users(email")) {
-      const email = String(values[0]);
-      if (state.users.some((item) => item.email === email)) throw pgError("23505");
-      const id = String(state.nextUserId++);
-      state.users.push({ id, email, password_hash: String(values[1]), role: sql.includes("'teacher'") ? "teacher" : "student" });
-      return rows([{ id }]);
-    }
-    if (sql.startsWith("insert into students(user_id")) {
-      const [userId, firstName, lastName, studentNumber, classId, dob, phone, address] = values;
-      if (state.students.some((item) => item.student_number === studentNumber)) throw pgError("23505");
-      const user = state.users.find((item) => item.id === String(userId));
-      const student: FakeStudent = { id: String(state.nextStudentId++), user_id: String(userId), email: user?.email ?? "", first_name: String(firstName), last_name: String(lastName), student_number: String(studentNumber), class_id: classId ? String(classId) : null, class_name: classId ? "Grade 10" : null, section: classId ? "A" : null, date_of_birth: dob ? String(dob) : null, phone: phone ? String(phone) : null, address: address ? String(address) : null, status: "active", created_at: new Date("2026-10-15T00:00:00Z") };
-      state.students.push(student);
-      return rows([{ id: student.id }]);
-    }
-    if (sql.startsWith("select s.id, u.email")) {
-      let found = state.students;
-      const idFilter = sql.match(/where s\.id\s*=\s*\$\d+/);
-      if (idFilter) found = found.filter((student) => student.id === String(values[0]));
-      return rows(found.map(({ id, email, first_name, last_name, student_number, class_id, class_name, section, date_of_birth, phone, address, status, created_at }) => ({ id, email, first_name, last_name, student_number, class_id, class_name, section, date_of_birth, phone, address, status, created_at })));
-    }
-    if (sql.startsWith("select user_id from students")) {
-      const student = state.students.find((item) => item.id === String(values[0]) && item.status === "active");
-      return rows(student ? [{ user_id: student.user_id }] : []);
-    }
-    if (sql.startsWith("update users set email")) {
-      const user = state.users.find((item) => item.id === String(values[1]));
-      if (state.users.some((item) => item.email === values[0] && item.id !== String(values[1]))) throw pgError("23505");
-      if (user) user.email = String(values[0]);
-      return rows([], user ? 1 : 0);
-    }
-    if (sql.startsWith("update students set first_name")) {
-      const student = state.students.find((item) => item.id === String(values[7]));
-      if (!student) return rows([], 0);
-      [student.first_name, student.last_name, student.student_number] = [String(values[0]), String(values[1]), String(values[2])];
-      student.class_id = values[3] ? String(values[3]) : null; student.class_name = values[3] ? "Grade 10" : null; student.section = values[3] ? "A" : null;
-      student.date_of_birth = values[4] ? String(values[4]) : null; student.phone = values[5] ? String(values[5]) : null; student.address = values[6] ? String(values[6]) : null;
-      student.email = state.users.find((item) => item.id === student.user_id)?.email ?? student.email;
-      return rows([], 1);
-    }
-    if (sql.startsWith("update students set status")) {
-      const student = state.students.find((item) => item.id === String(values[0]) && item.status === "active");
-      if (student) student.status = "inactive";
-      return rows([], student ? 1 : 0);
-    }
-    if (sql.startsWith("select 1 from students where id=$1 and class_id=$2")) {
-      const student = state.students.find((item) => item.id === String(values[0]) && item.class_id === String(values[1]) && item.status === "active");
-      return rows(student ? [{ ok: 1 }] : []);
-    }
-    if (sql.startsWith("select 1 from teachers where id=$1 and status='active'")) return rows([]);
-    if (sql.startsWith("insert into attendance(")) {
-      if (state.attendance.some((item) => item.student_id === String(values[0]) && item.class_id === String(values[1]) && item.attendance_date === values[2])) throw pgError("23505");
-      const row = { id: String(state.nextAttendanceId++), student_id: String(values[0]), class_id: String(values[1]), attendance_date: String(values[2]), status: String(values[3]) };
-      state.attendance.push(row);
-      return rows([{ id: row.id }]);
-    }
-    if (sql.startsWith("select a.id, a.student_id")) {
-      const selected = sql.includes("order by a.attendance_date") ? state.attendance.slice(0, 200) : state.attendance.filter((item) => item.id === String(values[0]));
-      return rows(selected.flatMap((attendance) => {
-        const student = state.students.find((item) => item.id === attendance.student_id);
-        return student ? [{ id: attendance.id, student_id: student.id, student_name: `${student.first_name} ${student.last_name}`, student_number: student.student_number, class_id: "1", class_name: "Grade 10", section: "A", attendance_date: attendance.attendance_date, status: attendance.status }] : [];
-      }));
-    }
-    if (sql.startsWith("select count(*) filter (where a.status='present')")) {
-      const present = state.attendance.filter((item) => item.status === "present").length;
-      const absent = state.attendance.filter((item) => item.status === "absent").length;
-      const late = state.attendance.filter((item) => item.status === "late").length;
-      return rows([{ present, absent, late, total: state.attendance.length }]);
-    }
-    if (sql.startsWith("select class_id,max_score from examinations")) return String(values[0]) === "1" ? rows([{ class_id: "1", max_score: "100" }]) : rows([]);
-    if (sql.startsWith("select count(*)::int as total from academic_results")) return rows([{ total: 450 }]);
-    if (sql.startsWith("select r.id,r.student_id")) return rows([{ id: "1", student_id: "1", student_name: "Jordan Lee", student_number: "S-2026-001", examination_id: "1", title: "Term 1 Mathematics", class_name: "Grade 10", exam_date: "2026-10-08", score: "88", max_score: "100" }]);
-    if (sql.startsWith("select f.id,f.student_id")) return rows([{ id: "1", student_id: "1", student_name: "Jordan Lee", student_number: "S-2026-001", description: "Term 1 tuition", academic_year: "2026-27", amount: "1000", due_date: "2026-11-15", amount_paid: "250", balance: "750", status: "partially paid" }]);
-    if (sql.startsWith("select count(*)::int as total,") && sql.includes("from fee_records f")) return rows([{ total: 1, obligations: 1000, collected: 250, outstanding: 750 }]);
-    if (sql.startsWith("select amount from fee_records")) return rows([{ amount: "1000" }]);
-    if (sql.startsWith("select 1 from fee_records where id=$1 and student_id=$2")) return String(values[0]) === "1" && String(values[1]) === "1" ? rows([{ ok: 1 }]) : rows([]);
-    if (sql.startsWith("select 1 from fee_records where id=$1")) return String(values[0]) === "1" ? rows([{ ok: 1 }]) : rows([]);
-    if (sql.startsWith("select id,amount,paid_at,reference_code from fee_payments")) return rows([]);
-    if (sql.startsWith("select coalesce(sum(amount),0)::text as total from fee_payments")) return rows([{ total: "250" }]);
-    if (sql.startsWith("insert into fee_payments")) return rows([{ id: "1", paid_at: new Date() }]);
-    if (sql.startsWith("select 1")) return rows([{ ok: 1 }]);
-    throw new Error(`Unhandled fake query in test: ${sql}`);
-  }
+    const teacherStats = await request(app).get("/api/dashboard/stats").set("Cookie", teacher);
+    expect(teacherStats.body.data.summary).toMatchObject({ totalStudents: 1, totalTeachers: null, attendance: { present: 1, total: 1 } });
+    expect(teacherStats.body.data.fees).toBeNull();
+    const studentStats = await request(app).get("/api/dashboard/stats").set("Cookie", await login("student-a"));
+    expect(studentStats.body.data.summary).toMatchObject({ totalStudents: null, totalTeachers: null, attendance: { present: 1, total: 1 } });
+    expect(studentStats.body.data.fees).toEqual({ obligations: 1000, collected: 250, outstanding: 750 });
+    expect(studentStats.body.data.recentStudents).toHaveLength(1);
+    expect(studentStats.body.data.academics.resultCount).toBe(1);
+  });
 
-  const client = { query, release: () => undefined } as unknown as PoolClient;
-  const pool = { query, connect: async () => client } as unknown as Pool;
-  return { pool, state };
-}
+  it("stays correct for a teacher with no assigned classes", async () => {
+    await SchoolClass.updateOne({ _id: ids.classA }, { teacherId: new Types.ObjectId() });
+    const stats = await request(app).get("/api/dashboard/stats").set("Cookie", await login("teacher-a"));
+    expect(stats.status).toBe(200);
+    expect(stats.body.data.summary.totalStudents).toBe(0);
+    expect(stats.body.data.academics.resultCount).toBe(0);
+  });
+});

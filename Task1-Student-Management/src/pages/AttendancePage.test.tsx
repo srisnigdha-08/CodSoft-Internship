@@ -4,11 +4,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AttendanceRecord, User } from '../types'
 import { AttendancePage } from './AttendancePage'
 
-const admin: User = { id: 1, email: 'admin@integration.example.test', role: 'admin' }
-const student: User = { id: 2, email: 'student@integration.example.test', role: 'student', studentId: 1 }
+const admin: User = { id: 'u1', email: 'admin@integration.example.test', role: 'admin' }
+const student: User = { id: 'u2', email: 'student@integration.example.test', role: 'student', studentId: 's1' }
 const record: AttendanceRecord = {
-  id: 5, studentId: 1, studentName: 'Test Learner', studentNumber: 'UI-S1',
-  classId: 1, className: 'Test Grade', section: 'A', date: '2026-10-16', status: 'present',
+  id: '5', studentId: 's1', studentName: 'Test Learner', studentNumber: 'UI-S1',
+  classId: 'c1', className: 'Test Grade', section: 'A', date: '2026-10-16', status: 'present',
 }
 
 function json(data: unknown, meta?: unknown, status = 200) {
@@ -21,14 +21,14 @@ function fakeApi(failCorrection = false) {
   let current = { ...record }
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input)
-    if (path === '/api/attendance/5/corrections') return json(current.status === 'late' ? [{ id: 1, attendanceId: 5, previousStatus: 'present', newStatus: 'late', correctedBy: 1, correctedAt: '2026-10-16T12:00:00.000Z' }] : [])
+    if (path === '/api/attendance/5/corrections') return json(current.status === 'late' ? [{ id: 'h1', attendanceId: '5', previousStatus: 'present', newStatus: 'late', correctedBy: 'u1', correctedAt: '2026-10-16T12:00:00.000Z' }] : [])
     if (path === '/api/attendance/5' && init?.method === 'PUT') {
       if (failCorrection) return new Response(JSON.stringify({ error: { code: 'FORBIDDEN', message: 'You can only correct attendance for your assigned classes.' } }), { status: 403, headers: { 'Content-Type': 'application/json' } })
       current = { ...current, status: 'late' }
       return json(current)
     }
     if (path.startsWith('/api/attendance')) return json([current], { summary: { present: current.status === 'present' ? 1 : 0, absent: 0, late: current.status === 'late' ? 1 : 0 }, total: 1 })
-    if (path === '/api/classes') return json([{ id: 1, name: 'Test Grade', section: 'A', teacherId: null, teacherName: null, studentCount: 1 }])
+    if (path === '/api/classes') return json([{ id: 'c1', name: 'Test Grade', section: 'A', teacherId: null, teacherName: null, studentCount: 1 }])
     if (path.startsWith('/api/students')) return json([], { page: 1, total: 0, pages: 1 })
     throw new Error(`Unexpected test request: ${path}`)
   })

@@ -26,7 +26,7 @@ export function ClassesPage() {
 }
 
 function ClassForm({ item, teachers, onClose, onSaved }: { item?: SchoolClass; teachers: Teacher[]; onClose: () => void; onSaved: () => void }) {
-  const [draft, setDraft] = useState<ClassDraft>(item ? { name: item.name, section: item.section, teacherId: item.teacherId ? String(item.teacherId) : '' } : { name: '', section: 'A', teacherId: '' })
+  const [draft, setDraft] = useState<ClassDraft>(item ? { name: item.name, section: item.section, teacherId: item.teacherId ?? '' } : { name: '', section: 'A', teacherId: '' })
   const [error, setError] = useState('')
   const [pending, setPending] = useState(false)
   async function submit(event: FormEvent<HTMLFormElement>) {

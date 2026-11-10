@@ -20,7 +20,7 @@ export function AcademicsPage({ user }: { user: User }) {
   const [resultDraft, setResultDraft] = useState({ examinationId: '', studentId: '', score: '' })
   const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState('')
-  const selectedExam = examinations.find((exam) => exam.id === Number(resultDraft.examinationId))
+  const selectedExam = examinations.find((exam) => exam.id === resultDraft.examinationId)
   const eligibleStudents = useMemo(() => students.filter((student) => student.classId === selectedExam?.classId), [students, selectedExam])
 
   useEffect(() => {
@@ -40,7 +40,7 @@ export function AcademicsPage({ user }: { user: User }) {
   async function saveExam(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setSaving(true); setError(''); setNotice('')
     try {
-      await apiRequest('/academics/examinations', { method: 'POST', body: JSON.stringify({ ...examDraft, classId: Number(examDraft.classId), maxScore: Number(examDraft.maxScore) }) })
+      await apiRequest('/academics/examinations', { method: 'POST', body: JSON.stringify({ ...examDraft, maxScore: Number(examDraft.maxScore) }) })
       setExamDraft({ title: '', classId: '', date: '', maxScore: '100' }); setNotice('Examination created.'); setRefresh((value) => value + 1)
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not create examination.') }
     finally { setSaving(false) }
@@ -49,7 +49,7 @@ export function AcademicsPage({ user }: { user: User }) {
   async function saveResult(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setSaving(true); setError(''); setNotice('')
     try {
-      await apiRequest('/academics/results', { method: 'POST', body: JSON.stringify({ examinationId: Number(resultDraft.examinationId), studentId: Number(resultDraft.studentId), score: Number(resultDraft.score) }) })
+      await apiRequest('/academics/results', { method: 'POST', body: JSON.stringify({ examinationId: resultDraft.examinationId, studentId: resultDraft.studentId, score: Number(resultDraft.score) }) })
       setResultDraft({ examinationId: '', studentId: '', score: '' }); setNotice('Student result saved.'); setRefresh((value) => value + 1)
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not save this result.') }
     finally { setSaving(false) }

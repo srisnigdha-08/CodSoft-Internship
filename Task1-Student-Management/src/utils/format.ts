@@ -1,5 +1,5 @@
 export function formatDate(value: string | Date) {
-  // A PostgreSQL DATE has no timezone. Parse its ISO date-only form as a local
+  // The API sends calendar days without a timezone. Parse that date-only form as a local
   // calendar day so users west of UTC do not see the preceding day.
   const match = typeof value === 'string' ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(value) : null
   const date = match ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])) : new Date(value)

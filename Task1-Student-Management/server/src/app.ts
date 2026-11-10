@@ -1,18 +1,17 @@
 import cors from "cors";
 import express, { type ErrorRequestHandler } from "express";
-import type { Pool } from "pg";
-import { ApiError } from "./errors.js";
+import { pingDatabase } from "./db.js";
+import { ApiError, isDuplicateKey } from "./errors.js";
 import { academicsRouter } from "./routes/academics.js";
 import { attendanceRouter } from "./routes/attendance.js";
 import { authRouter } from "./routes/auth.js";
 import { classesRouter } from "./routes/classes.js";
 import { dashboardRouter } from "./routes/dashboard.js";
-import { feesRouter } from "./routes/fees.js";
+import { feesRouter, paymentsRouter } from "./routes/fees.js";
 import { studentsRouter } from "./routes/students.js";
 import { teachersRouter } from "./routes/teachers.js";
 
 interface AppOptions {
-  pool: Pool;
   jwtSecret: string;
   frontendOrigin: string;
   secureCookie: boolean;
@@ -35,22 +34,22 @@ export function createApp(options: AppOptions) {
   });
 
   app.get("/api/health", async (_req, res) => {
-    try {
-      await options.pool.query("SELECT 1");
+    if (await pingDatabase()) {
       res.json({ data: { status: "ok", database: "connected" } });
-    } catch {
-      res.status(503).json({ error: { code: "DATABASE_UNAVAILABLE", message: "The database is unavailable. Check the server configuration and database service." } });
+      return;
     }
+    res.status(503).json({ error: { code: "DATABASE_UNAVAILABLE", message: "The database is unavailable. Check the server configuration and database service." } });
   });
 
-  app.use("/api/auth", authRouter({ pool: options.pool, secret: options.jwtSecret, secureCookie: options.secureCookie }));
-  app.use("/api/dashboard", dashboardRouter(options.pool, options.jwtSecret));
-  app.use("/api/students", studentsRouter(options.pool, options.jwtSecret));
-  app.use("/api/teachers", teachersRouter(options.pool, options.jwtSecret));
-  app.use("/api/classes", classesRouter(options.pool, options.jwtSecret));
-  app.use("/api/attendance", attendanceRouter(options.pool, options.jwtSecret));
-  app.use("/api/academics", academicsRouter(options.pool, options.jwtSecret));
-  app.use("/api/fees", feesRouter(options.pool, options.jwtSecret));
+  app.use("/api/auth", authRouter({ secret: options.jwtSecret, secureCookie: options.secureCookie }));
+  app.use("/api/dashboard", dashboardRouter(options.jwtSecret));
+  app.use("/api/students", studentsRouter(options.jwtSecret));
+  app.use("/api/teachers", teachersRouter(options.jwtSecret));
+  app.use("/api/classes", classesRouter(options.jwtSecret));
+  app.use("/api/attendance", attendanceRouter(options.jwtSecret));
+  app.use("/api/academics", academicsRouter(options.jwtSecret));
+  app.use("/api/fees", feesRouter(options.jwtSecret));
+  app.use("/api/payments", paymentsRouter(options.jwtSecret));
 
   app.use((_req, res) => {
     res.status(404).json({ error: { code: "NOT_FOUND", message: "API endpoint was not found." } });
@@ -62,12 +61,11 @@ export function createApp(options: AppOptions) {
       res.status(error.status).json({ error: { code: error.code, message: error.message } });
       return;
     }
-    const databaseCode = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
-    if (databaseCode === "23505") {
+    if (isDuplicateKey(error)) {
       res.status(409).json({ error: { code: "DUPLICATE_RECORD", message: "A record with those details already exists." } });
       return;
     }
-    if (databaseCode === "23503" || databaseCode === "23514") {
+    if (error instanceof Error && (error.name === "ValidationError" || error.name === "CastError")) {
       res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "The request refers to an invalid or unavailable record." } });
       return;
     }

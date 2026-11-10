@@ -1,3 +1,5 @@
+import { Types } from "mongoose";
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -26,11 +28,17 @@ export function requireEmail(value: unknown): string {
   return email;
 }
 
-export function requirePositiveId(value: unknown, field = "ID"): number {
+export function requirePositiveInteger(value: unknown, field: string): number {
   assert(typeof value === "string" || typeof value === "number", 400, `${field} must be a positive integer.`, "VALIDATION_ERROR");
-  const id = Number(value);
-  assert(Number.isSafeInteger(id) && id > 0, 400, `${field} must be a positive integer.`, "VALIDATION_ERROR");
-  return id;
+  const parsed = Number(value);
+  assert(Number.isSafeInteger(parsed) && parsed > 0, 400, `${field} must be a positive integer.`, "VALIDATION_ERROR");
+  return parsed;
+}
+
+/** Accepts only a 24-character hex string, so request objects can never become query operators. */
+export function requireObjectId(value: unknown, field = "ID"): Types.ObjectId {
+  assert(typeof value === "string" && /^[0-9a-fA-F]{24}$/.test(value), 400, `${field} is not a valid record ID.`, "VALIDATION_ERROR");
+  return new Types.ObjectId(value);
 }
 
 export function requireDate(value: unknown, field: string): string {
@@ -55,6 +63,27 @@ export function hasTwoDecimalPlaces(value: number): boolean {
   return Math.round(value * 100) / 100 === value;
 }
 
-export function emailConflict(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "23505";
+export function toCents(amount: number): number {
+  return Math.round(amount * 100);
+}
+
+export function fromCents(cents: number): number {
+  return cents / 100;
+}
+
+/** Escapes user text so a search is always a literal substring match. */
+export function containsPattern(search: string): RegExp {
+  return new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+}
+
+export function isDuplicateKey(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === 11000;
+}
+
+/** Use in `.catch()` to report a unique-index conflict as HTTP 409. */
+export function conflictOnDuplicate(message: string) {
+  return (error: unknown): never => {
+    if (isDuplicateKey(error)) throw new ApiError(409, message, "DUPLICATE_RECORD");
+    throw error;
+  };
 }
