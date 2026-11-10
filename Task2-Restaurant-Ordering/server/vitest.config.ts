@@ -4,32 +4,34 @@ import { defineConfig } from 'vitest/config';
 
 dotenv.config({ path: path.resolve(__dirname, '.env') });
 
-// The suite writes and deletes rows, so it must never touch the development database.
-const testDatabaseUrl = process.env.TEST_DATABASE_URL;
-if (!testDatabaseUrl) {
-  throw new Error('TEST_DATABASE_URL is required to run the tests. Point it at a separate database (see server/.env.example).');
+// The suite clears its database before running, so it must never touch the development database.
+const testUri = process.env.MONGODB_TEST_URI;
+if (!testUri) {
+  throw new Error('MONGODB_TEST_URI is required to run the tests. Point it at a separate database (see server/.env.example).');
 }
 
-const databaseIdentity = (url: string) => {
-  const { hostname, port, pathname } = new URL(url);
-  return `${hostname}:${port || '5432'}${pathname}`;
+const databaseIdentity = (uri: string) => {
+  const { host, pathname } = new URL(uri);
+  return `${host}${pathname}`;
 };
 
-if (!/test/i.test(new URL(testDatabaseUrl).pathname)) {
-  throw new Error('Refusing to run: the TEST_DATABASE_URL database name must contain "test".');
+if (!/test/i.test(new URL(testUri).pathname)) {
+  throw new Error('Refusing to run: the MONGODB_TEST_URI database name must contain "test".');
 }
-if (process.env.DATABASE_URL && databaseIdentity(process.env.DATABASE_URL) === databaseIdentity(testDatabaseUrl)) {
-  throw new Error('Refusing to run: TEST_DATABASE_URL points at the same database as DATABASE_URL.');
+if (process.env.MONGODB_URI && databaseIdentity(process.env.MONGODB_URI) === databaseIdentity(testUri)) {
+  throw new Error('Refusing to run: MONGODB_TEST_URI points at the same database as MONGODB_URI.');
 }
 
 export default defineConfig({
   test: {
     environment: 'node',
     globalSetup: './tests/global-setup.ts',
+    testTimeout: 20000,
+    hookTimeout: 60000,
     env: {
       NODE_ENV: 'test',
       PORT: '5050',
-      DATABASE_URL: testDatabaseUrl,
+      MONGODB_URI: testUri,
       // Fixed values used only inside the test process
       JWT_SECRET: 'test-only-jwt-secret-not-used-outside-automated-tests',
       COOKIE_SECRET: 'test-only-cookie-secret-not-used-outside-automated-tests',

@@ -8,7 +8,7 @@ This learning guide provides an in-depth walkthrough of the design, architectura
 
 1. [Architectural Overview & Data Flow](#1-architectural-overview--data-flow)
 2. [Technology Stack & Why Each Was Chosen](#2-technology-stack--why-each-was-chosen)
-3. [Relational Database Modeling with Prisma & PostgreSQL](#3-relational-database-modeling-with-prisma--postgresql)
+3. [Document Modeling with Mongoose & MongoDB](#3-document-modeling-with-mongoose--mongodb)
 4. [Critical Business Logic & Architectural Patterns](#4-critical-business-logic--architectural-patterns)
    - [A. Server-Side Price Recalculation (Zero-Trust Client)](#a-server-side-price-recalculation-zero-trust-client)
    - [B. Concurrency Control & Double-Booking Prevention](#b-concurrency-control--double-booking-prevention)
@@ -34,10 +34,10 @@ flowchart TD
         API --> AuthGuard["JWT & RBAC Middleware"]
         AuthGuard --> ZodValidate["Zod Schema Validator"]
         ZodValidate --> Controllers["Domain Controllers"]
-        Controllers --> Prisma["Prisma ORM (Data Access Layer)"]
+        Controllers --> Mongoose["Mongoose (Data Access Layer)"]
     end
     
-    Prisma -->|"Parameterized SQL"| DB[("PostgreSQL Database (Port 5432)")]
+    Mongoose -->|"Validated documents"| DB[("MongoDB Database (Port 27017)")]
 ```
 
 ### The Request Lifecycle
@@ -47,7 +47,7 @@ When a user interacts with the application (e.g., placing an order):
 3. **Authentication & Authorization:** The `authenticate` middleware inspects the HttpOnly cookie or `Authorization: Bearer <token>` header. It validates the cryptographic signature using HMAC-SHA256 and attaches the user payload (`req.user`) to the request.
 4. **Input Validation:** Request bodies pass through strict Zod schemas. Invalid payloads (e.g., negative quantities, malformed phone numbers) are rejected immediately with a structured 400 Bad Request error.
 5. **Business Logic Execution:** The controller executes domain rules inside database transactions (e.g., querying current prices, locking table availability, creating order items).
-6. **Data Persistence:** Prisma translates operations into parameterized SQL queries against PostgreSQL.
+6. **Data Persistence:** Mongoose validates documents and writes them to MongoDB.
 7. **Response Formatting:** The API returns a consistent JSON response envelope: `{ success: true, data: { ... } }`.
 
 ---
@@ -60,33 +60,28 @@ When a user interacts with the application (e.g., placing an order):
 | **Styling & Design** | **Tailwind CSS 3** | Utility-first CSS providing a bespoke, cohesive culinary theme (`cream`, `terracotta`, `charcoal`) without bulky CSS runtime overhead. |
 | **Type Safety** | **TypeScript 5.x** | End-to-end interface contracts across frontend and backend, catching subtle runtime bugs at compile time. |
 | **Backend Framework** | **Node.js + Express 4** | Lightweight, event-driven I/O model ideal for concurrent API requests, extensive ecosystem, and high performance. |
-| **Database** | **PostgreSQL** | Robust relational database supporting ACID transactions, strict schema constraints, foreign keys, and numeric decimal accuracy. |
-| **ORM** | **Prisma 5.22** | Type-safe query building, intuitive schema definition, automated migrations, and built-in connection pooling. |
+| **Database** | **MongoDB** | Flexible document model that keeps an order and its line items together, with unique indexes and multi-document transactions on replica sets. |
+| **ODM** | **Mongoose 8** | Schema validation, TypeScript support, virtual populate for related documents, and index management. |
 | **Validation** | **Zod** | Declarative schema validation ensuring incoming client payloads strictly adhere to expected types and ranges before reaching controllers. |
 
 ---
 
-## 3. Relational Database Modeling with Prisma & PostgreSQL
+## 3. Document Modeling with Mongoose & MongoDB
 
-The database schema (`server/prisma/schema.prisma`) is modeled according to 3NF (Third Normal Form) principles.
+The models live in `server/src/models`. Data that is always read together is embedded, and data with its own lifecycle gets a collection. [DATABASE_SCHEMA.md](DATABASE_SCHEMA.md) has the full reference.
 
-### Key Relational Entities
+### Key Entities
 
-1. **User:** Stores credentials, full name, phone number, and assigns one of three roles: `CUSTOMER`, `KITCHEN_STAFF`, or `ADMIN`.
-2. **MenuCategory & MenuItem:** Menu categories have a 1-to-many relationship with dishes. Each menu item tracks title, description, price, category, vegetarian flag, preparation time, and availability toggle.
-3. **RestaurantTable:** Represents physical restaurant tables with fixed seat capacities (`2`, `4`, `6`, `8`) and an `isActive` operational flag.
-4. **Order & OrderItem:** An order tracks dining type (`DINE_IN`, `PICKUP`, `DELIVERY`), lifecycle status (`PENDING` through `COMPLETED`), delivery address, and notes. Crucially, **`OrderItem` snapshots the exact unit price charged at the moment of purchase**, ensuring future menu price updates never corrupt historical sales ledgers.
-5. **Reservation:** Tracks customer bookings for specific dates, time slots, guest counts, and assigned tables.
-6. **Payment:** Records payment method (`CARD`, `UPI`, `CASH`, `MOCK_ONLINE`), amount, status (`PENDING`, `SUCCESSFUL`, `FAILED`, `REFUNDED`), and unique transaction references.
-7. **OrderStatusHistory:** An append-only audit trail logging every status change, timestamp, and optional transition notes.
+1. **User:** Stores credentials, name, phone number, and one of three roles: `CUSTOMER`, `KITCHEN_STAFF`, or `ADMIN`.
+2. **MenuCategory & MenuItem:** Each dish references its category by ObjectId and tracks price, vegetarian flag, preparation time, and availability.
+3. **RestaurantTable:** Physical tables with seat capacities and an `isActive` flag.
+4. **Order:** Tracks dining type (`DINE_IN`, `PICKUP`, `DELIVERY`), status, totals, and delivery address. **Line items are embedded**, and each one snapshots the name and unit price charged, so later menu changes never alter past orders.
+5. **Reservation:** Customer bookings for specific dates, time slots, guest counts, and tables.
+6. **Payment:** Simulated payment record, one per order, with method, amount, status (`PENDING`, `SUCCESSFUL`, `FAILED`, `REFUNDED`), and references.
+7. **OrderStatusHistory:** An append-only audit trail of every status change.
 
-### Exact Monetary Precision
-Floating-point arithmetic in JavaScript and SQL is notoriously prone to rounding errors (e.g., `0.1 + 0.2 = 0.30000000000000004`). In DineDesk:
-- Prices and financial totals are stored as PostgreSQL `Decimal(10, 2)`:
-  ```prisma
-  price Decimal @db.Decimal(10, 2)
-  ```
-- Calculations in the API use JavaScript numbers rounded to two decimal places at each step, and the results are stored in `Decimal(10, 2)` columns.
+### Monetary Precision
+Floating-point arithmetic is prone to rounding errors (e.g., `0.1 + 0.2 = 0.30000000000000004`). Prices and totals are stored in rupees as numbers, and every calculation is rounded to two decimal places as it happens, using the same formula on client and server.
 
 ---
 
@@ -114,8 +109,8 @@ Floating-point arithmetic in JavaScript and SQL is notoriously prone to rounding
 **The Problem:** Two customers attempting to reserve Table 4 for 7:00 PM on the same date could both receive confirmations if the system checks availability without isolation.
 
 **DineDesk Solution:** two layers work together.
-1. **Row locks.** Inside `prisma.$transaction`, the booking locks the candidate table rows with `SELECT ... FOR UPDATE`, so competing requests for those tables run one at a time and later requests see earlier bookings.
-2. **Partial unique index.** Migration SQL creates `reservations_active_table_slot_key` on `(tableId, reservationDate, reservationTime)` for rows whose status is `PENDING` or `CONFIRMED`. PostgreSQL itself rejects a second active booking for the same slot, even if a future code path forgets to check.
+1. **Partial unique index.** MongoDB enforces uniqueness on `(tableId, reservationDate, reservationTime)` for reservations with `holdsSlot: true`. That field is true only while the booking is `PENDING` or `CONFIRMED`. MongoDB itself rejects a second active booking, even if a future code path forgets to check.
+2. **Try the next table.** Auto-allocation attempts each suitable table in order, so a request that loses one table moves on to the next.
 
 A request that loses the race receives HTTP 409 Conflict.
 
@@ -175,7 +170,7 @@ Payments are simulated directly in the order and payment controllers. There is n
      - `authorize(Role.ADMIN)` for menu item creation, price editing, and analytics.
      - `authorize([Role.KITCHEN_STAFF, Role.ADMIN])` for kitchen KDS tickets.
      - `authenticate` for order and reservation history.
-4. **Defensive Parameterized Queries:** Prisma ORM parameterizes queries, and the two raw locking queries use tagged templates that bind their values as parameters.
+4. **Input Safety:** Zod rejects query-operator objects before they reach Mongoose, and search text is escaped before it is used in a regular expression.
 
 ---
 
@@ -227,11 +222,12 @@ Task2-Restaurant-Ordering/
 │   │   └── types/index.ts      # TypeScript models (Order, MenuItem, Reservation, User)
 │
 ├── server/                     # Backend API & Database Service
-│   ├── prisma/
-│   │   ├── schema.prisma       # Relational models, constraints, and enums
-│   │   ├── migrations/         # Versioned SQL migrations
-│   │   └── seed.ts             # Pre-seeded dishes, categories, tables, and test users
 │   ├── src/
+│   │   ├── models/             # Mongoose schemas, enums, and indexes
+│   │   ├── seed/               # Fictional demo data and seeding logic
+│   │   ├── scripts/            # Seed command and PostgreSQL data migration tool
+│   │   ├── services/           # Order status transitions
+│   │   ├── db.ts               # Connection, health check, and transactions
 │   │   ├── controllers/        # Domain controllers (auth, menu, orders, kitchen, etc.)
 │   │   ├── middleware/         # Auth guards, role checks, error handler
 │   │   ├── routes/             # REST endpoint routing definitions

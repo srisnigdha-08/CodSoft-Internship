@@ -2,6 +2,11 @@
 
 Base URL: `http://localhost:5050/api/v1`
 
+All ids are 24-character hexadecimal MongoDB ObjectIds returned as `id`.
+
+### `GET /api/health`
+Outside the versioned path. Verifies MongoDB connectivity and returns `{ "status": "ok", "database": "connected" }`, or HTTP 503 with `"database": "disconnected"`. Connection details are never included. `GET /health` is an alias.
+
 ---
 
 ## 1. Authentication Endpoints
@@ -23,7 +28,7 @@ Creates a new customer account.
     "success": true,
     "message": "Registration successful",
     "data": {
-      "user": { "id": "uuid", "name": "Priya Sharma", "email": "priya@example.com", "role": "CUSTOMER" }
+      "user": { "id": "6730f1a2b4c9d8e7f6a5b4c3", "name": "Priya Sharma", "email": "priya@example.com", "role": "CUSTOMER" }
     }
   }
   ```
@@ -43,7 +48,7 @@ Authenticates the user and sets the JWT in the `dinedesk_token` HttpOnly cookie.
     "success": true,
     "message": "Login successful",
     "data": {
-      "user": { "id": "uuid", "name": "Priya Sharma", "email": "customer@dinedesk.local", "role": "CUSTOMER" }
+      "user": { "id": "6730f1a2b4c9d8e7f6a5b4c3", "name": "Priya Sharma", "email": "customer@dinedesk.local", "role": "CUSTOMER" }
     }
   }
   ```
@@ -100,11 +105,11 @@ Creates a new order with server-side price recalculation. Quantity must be 1 to 
     "customerEmail": "priya@example.com",
     "customerPhone": "+91 98765 43212",
     "orderType": "DINE_IN",
-    "tableId": "uuid-table-id",
+    "tableId": "6730f1a2b4c9d8e7f6a5b4c4",
     "paymentMethod": "MOCK_ONLINE",
     "notes": "Less spicy please",
     "items": [
-      { "menuItemId": "uuid-item-1", "quantity": 2, "notes": "Extra crisp" }
+      { "menuItemId": "6730f1a2b4c9d8e7f6a5b4c5", "quantity": 2, "notes": "Extra crisp" }
     ]
   }
   ```
@@ -114,7 +119,7 @@ Creates a new order with server-side price recalculation. Quantity must be 1 to 
 Retrieves the logged-in customer's order history. Requires authentication.
 
 ### `GET /orders/:id`
-Retrieves order details, items, table, and progress timeline. Account orders are limited to their owner and staff. Guest orders are reachable only by UUID, not by order number.
+Retrieves order details, items, table, and progress timeline. Account orders are limited to their owner and staff. Guest orders are reachable only by their id, not by order number.
 
 ### `PATCH /orders/:id/cancel`
 Cancels an order if it is still in `PENDING` or `CONFIRMED` state, using the same access rule. A successful simulated payment becomes `REFUNDED`.
@@ -152,7 +157,7 @@ Checks table availability for a specified date, time, and guest count.
   ```
 
 ### `POST /reservations`
-Books a table for a future date and time. Row locks and a partial unique index reject a second active booking of the same table, date and time with `409 Conflict`.
+Books a table for a future date and time. A partial unique index rejects a second active booking of the same table, date and time with `409 Conflict`.
 
 ### `GET /reservations/my`
 The signed-in customer's reservation list. Requires authentication.

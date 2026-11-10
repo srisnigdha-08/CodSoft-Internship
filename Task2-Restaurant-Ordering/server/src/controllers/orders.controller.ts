@@ -1,10 +1,13 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import prisma from '../prisma';
-import { OrderStatus, OrderType, PaymentMethod, PaymentStatus } from '@prisma/client';
-import { BadRequestError, ConflictError, NotFoundError } from '../utils/errors';
+import { Order, OrderStatus, OrderStatusHistory, OrderType, MenuItem, Payment, PaymentMethod, PaymentStatus, RestaurantTable } from '../models';
+import { randomObjectId } from '../models/shared';
+import { runAtomic } from '../db';
+import { transitionOrder } from '../services/orderTransitions';
+import { BadRequestError, NotFoundError } from '../utils/errors';
 import { sendCreated, sendSuccess } from '../utils/response';
 import { assertRecordAccess } from '../utils/access';
+import { idOrField, objectIdSchema } from '../utils/ids';
 
 const MAX_ITEM_QUANTITY = 50;
 
@@ -13,14 +16,14 @@ const createOrderSchema = z.object({
   customerEmail: z.string().email('Valid email is required').toLowerCase(),
   customerPhone: z.string().trim().regex(/^[+\d][\d\s()-]{6,19}$/, 'Valid contact number is required'),
   orderType: z.nativeEnum(OrderType),
-  tableId: z.string().uuid().optional().nullable(),
+  tableId: objectIdSchema('Invalid table ID').optional().nullable(),
   deliveryAddress: z.string().max(500).optional().nullable(),
   notes: z.string().max(500).optional().nullable(),
   paymentMethod: z.nativeEnum(PaymentMethod).default(PaymentMethod.MOCK_ONLINE),
   simulatePaymentFailure: z.boolean().optional().default(false),
   items: z.array(
     z.object({
-      menuItemId: z.string().uuid('Invalid menu item ID'),
+      menuItemId: objectIdSchema('Invalid menu item ID'),
       quantity: z.number().int().min(1, 'Quantity must be at least 1').max(MAX_ITEM_QUANTITY, `Quantity cannot exceed ${MAX_ITEM_QUANTITY}`),
       notes: z.string().max(300).optional().nullable(),
     })
@@ -31,6 +34,8 @@ const cancelOrderSchema = z.object({
   reason: z.string().trim().min(1).max(300).optional(),
 });
 
+const historyAscending = { sort: { createdAt: 1, _id: 1 } };
+
 export async function createOrder(req: Request, res: Response, next: NextFunction) {
   try {
     const validated = createOrderSchema.parse(req.body);
@@ -40,19 +45,15 @@ export async function createOrder(req: Request, res: Response, next: NextFunctio
     }
 
     if (validated.orderType === OrderType.DINE_IN && validated.tableId) {
-      const table = await prisma.restaurantTable.findUnique({
-        where: { id: validated.tableId },
-      });
+      const table = await RestaurantTable.findById(validated.tableId);
       if (!table || !table.isActive) {
         throw new BadRequestError('Selected table is unavailable.');
       }
     }
 
     // Retrieve and validate all menu items from database
-    const itemIds = [...new Set(validated.items.map((i) => i.menuItemId))];
-    const dbMenuItems = await prisma.menuItem.findMany({
-      where: { id: { in: itemIds } },
-    });
+    const itemIds = [...new Set(validated.items.map((i) => i.menuItemId.toLowerCase()))];
+    const dbMenuItems = await MenuItem.find({ _id: { $in: itemIds } });
 
     if (dbMenuItems.length !== itemIds.length) {
       throw new BadRequestError('One or more selected menu items do not exist.');
@@ -66,17 +67,17 @@ export async function createOrder(req: Request, res: Response, next: NextFunctio
     }
 
     // Recalculate totals on server
-    const menuItemsMap = new Map(dbMenuItems.map((item) => [item.id, item]));
+    const menuItemsMap = new Map(dbMenuItems.map((item) => [item.id as string, item]));
     let subtotalNum = 0;
 
     const orderItemsData = validated.items.map((item) => {
-      const dbItem = menuItemsMap.get(item.menuItemId)!;
-      const unitPrice = Number(dbItem.price);
+      const dbItem = menuItemsMap.get(item.menuItemId.toLowerCase())!;
+      const unitPrice = dbItem.price;
       const lineSubtotal = Number((unitPrice * item.quantity).toFixed(2));
       subtotalNum = Number((subtotalNum + lineSubtotal).toFixed(2));
 
       return {
-        menuItemId: dbItem.id,
+        menuItemId: dbItem._id,
         name: dbItem.name,
         price: dbItem.price,
         quantity: item.quantity,
@@ -93,35 +94,45 @@ export async function createOrder(req: Request, res: Response, next: NextFunctio
     const paymentNumber = `PAY-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
 
     const customerId = req.user?.userId || null;
+    const orderId = randomObjectId();
 
-    // Database transaction to atomically persist Order, OrderItems, Payment, and Initial Status
-    const result = await prisma.$transaction(async (tx) => {
-      const isOnlinePayment = validated.paymentMethod !== PaymentMethod.CASH;
-      const isSimulatedFailure = isOnlinePayment && validated.simulatePaymentFailure;
-      const isMockSuccess = isOnlinePayment && !isSimulatedFailure;
+    const isOnlinePayment = validated.paymentMethod !== PaymentMethod.CASH;
+    const isSimulatedFailure = isOnlinePayment && validated.simulatePaymentFailure;
+    const isMockSuccess = isOnlinePayment && !isSimulatedFailure;
 
-      const order = await tx.order.create({
-        data: {
-          orderNumber,
-          customerId,
-          customerName: validated.customerName,
-          customerEmail: validated.customerEmail,
-          customerPhone: validated.customerPhone,
-          orderType: validated.orderType,
-          tableId: validated.orderType === OrderType.DINE_IN ? validated.tableId || null : null,
-          deliveryAddress: validated.orderType === OrderType.DELIVERY ? validated.deliveryAddress!.trim() : null,
-          status: isMockSuccess ? OrderStatus.CONFIRMED : OrderStatus.PENDING,
-          subtotal: subtotalNum,
-          tax: taxNum,
-          deliveryFee: deliveryFeeNum,
-          totalAmount: totalAmountNum,
-          notes: validated.notes || null,
-          items: {
-            create: orderItemsData,
-          },
-          payment: {
-            create: {
+    // Order, payment and initial status history are persisted as one unit
+    await runAtomic(
+      async (session) => {
+        await Order.create(
+          [
+            {
+              _id: orderId,
+              orderNumber,
+              customerId,
+              customerName: validated.customerName,
+              customerEmail: validated.customerEmail,
+              customerPhone: validated.customerPhone,
+              orderType: validated.orderType,
+              tableId: validated.orderType === OrderType.DINE_IN ? validated.tableId || null : null,
+              deliveryAddress: validated.orderType === OrderType.DELIVERY ? validated.deliveryAddress!.trim() : null,
+              status: isMockSuccess ? OrderStatus.CONFIRMED : OrderStatus.PENDING,
+              subtotal: subtotalNum,
+              tax: taxNum,
+              deliveryFee: deliveryFeeNum,
+              totalAmount: totalAmountNum,
+              notes: validated.notes || null,
+              items: orderItemsData,
+            },
+          ],
+          { session }
+        );
+
+        await Payment.create(
+          [
+            {
               paymentNumber,
+              orderId,
+              customerId,
               amount: totalAmountNum,
               method: validated.paymentMethod,
               status: isMockSuccess
@@ -141,42 +152,49 @@ export async function createOrder(req: Request, res: Response, next: NextFunctio
                 timestamp: new Date().toISOString(),
               }),
             },
-          },
-          statusHistory: {
-            create: [
-              {
-                previousStatus: null,
-                newStatus: OrderStatus.PENDING,
-                changedByUserId: customerId,
-                notes: 'Order initiated by customer',
-              },
-              ...(isMockSuccess
-                ? [
-                    {
-                      previousStatus: OrderStatus.PENDING,
-                      newStatus: OrderStatus.CONFIRMED,
-                      changedByUserId: customerId,
-                      notes: 'Simulated payment succeeded; order automatically confirmed',
-                    },
-                  ]
-                : []),
-            ],
-          },
-        },
-        include: {
-          items: true,
-          payment: true,
-          table: true,
-          statusHistory: {
-            orderBy: { createdAt: 'asc' },
-          },
-        },
-      });
+          ],
+          { session }
+        );
 
-      return order;
-    });
+        await OrderStatusHistory.insertMany(
+          [
+            {
+              orderId,
+              previousStatus: null,
+              newStatus: OrderStatus.PENDING,
+              changedByUserId: customerId,
+              notes: 'Order initiated by customer',
+            },
+            ...(isMockSuccess
+              ? [
+                  {
+                    orderId,
+                    previousStatus: OrderStatus.PENDING,
+                    newStatus: OrderStatus.CONFIRMED,
+                    changedByUserId: customerId,
+                    notes: 'Simulated payment succeeded; order automatically confirmed',
+                  },
+                ]
+              : []),
+          ],
+          { session }
+        );
+      },
+      async () => {
+        await Promise.all([
+          Order.deleteOne({ _id: orderId }),
+          Payment.deleteOne({ orderId }),
+          OrderStatusHistory.deleteMany({ orderId }),
+        ]);
+      }
+    );
 
-    return sendCreated(res, { order: result }, 'Order placed successfully');
+    const order = await Order.findById(orderId)
+      .populate('payment')
+      .populate('table')
+      .populate({ path: 'statusHistory', options: historyAscending });
+
+    return sendCreated(res, { order }, 'Order placed successfully');
   } catch (err) {
     next(err);
   }
@@ -184,18 +202,11 @@ export async function createOrder(req: Request, res: Response, next: NextFunctio
 
 export async function getMyOrders(req: Request, res: Response, next: NextFunction) {
   try {
-    const orders = await prisma.order.findMany({
-      where: { customerId: req.user!.userId },
-      orderBy: { createdAt: 'desc' },
-      include: {
-        items: true,
-        payment: true,
-        table: true,
-        statusHistory: {
-          orderBy: { createdAt: 'desc' },
-        },
-      },
-    });
+    const orders = await Order.find({ customerId: req.user!.userId })
+      .sort({ createdAt: -1, _id: -1 })
+      .populate('payment')
+      .populate('table')
+      .populate({ path: 'statusHistory', options: { sort: { createdAt: -1, _id: -1 } } });
 
     return sendSuccess(res, { orders });
   } catch (err) {
@@ -207,28 +218,15 @@ export async function getOrderById(req: Request, res: Response, next: NextFuncti
   try {
     const { id } = req.params;
 
-    const order = await prisma.order.findFirst({
-      where: {
-        OR: [{ id }, { orderNumber: id }],
-      },
-      include: {
-        items: {
-          include: {
-            menuItem: true,
-          },
-        },
-        payment: true,
-        table: true,
-        statusHistory: {
-          orderBy: { createdAt: 'asc' },
-          include: {
-            changedBy: {
-              select: { name: true, role: true },
-            },
-          },
-        },
-      },
-    });
+    const order = await Order.findOne(idOrField(id, 'orderNumber'))
+      .populate('items.menuItem')
+      .populate('payment')
+      .populate('table')
+      .populate({
+        path: 'statusHistory',
+        options: historyAscending,
+        populate: { path: 'changedBy', select: 'name role' },
+      });
 
     if (!order) {
       throw new NotFoundError('Order not found');
@@ -247,10 +245,7 @@ export async function cancelOrder(req: Request, res: Response, next: NextFunctio
     const { id } = req.params;
     const reason = cancelOrderSchema.parse(req.body ?? {}).reason || 'Cancelled by customer';
 
-    const order = await prisma.order.findFirst({
-      where: { OR: [{ id }, { orderNumber: id }] },
-      include: { payment: true },
-    });
+    const order = await Order.findOne(idOrField(id, 'orderNumber'));
 
     if (!order) {
       throw new NotFoundError('Order not found');
@@ -263,46 +258,35 @@ export async function cancelOrder(req: Request, res: Response, next: NextFunctio
       throw new BadRequestError(`Cannot cancel order in "${order.status}" status. Only PENDING or CONFIRMED orders can be cancelled.`);
     }
 
-    const updatedOrder = await prisma.$transaction(async (tx) => {
-      // Conditional update: fails if the kitchen advanced the order after it was read above
-      const { count } = await tx.order.updateMany({
-        where: { id: order.id, status: order.status },
-        data: { status: OrderStatus.CANCELLED },
-      });
-      if (count === 0) {
-        throw new ConflictError('This order was just updated by the kitchen and can no longer be cancelled.');
-      }
+    const payment = await Payment.findOne({ orderId: order._id });
 
-      await tx.orderStatusHistory.create({
-        data: {
-          orderId: order.id,
-          previousStatus: order.status,
-          newStatus: OrderStatus.CANCELLED,
-          changedByUserId: req.user?.userId || null,
-          notes: reason,
-        },
-      });
-
-      if (order.payment && order.payment.status === PaymentStatus.SUCCESSFUL) {
-        await tx.payment.update({
-          where: { id: order.payment.id },
-          data: {
-            status: PaymentStatus.REFUNDED,
-            gatewayResponse: JSON.stringify({
-              simulated: true,
-              refunded: true,
-              refundReason: reason,
-              timestamp: new Date().toISOString(),
-            }),
-          },
-        });
-      }
-
-      return tx.order.findUniqueOrThrow({
-        where: { id: order.id },
-        include: { items: true, payment: true, statusHistory: true },
-      });
+    await transitionOrder({
+      orderId: order._id,
+      from: order.status,
+      to: OrderStatus.CANCELLED,
+      changedByUserId: req.user?.userId || null,
+      notes: reason,
+      conflictMessage: 'This order was just updated by the kitchen and can no longer be cancelled.',
+      payment:
+        payment && payment.status === PaymentStatus.SUCCESSFUL
+          ? {
+              id: payment._id,
+              previousStatus: payment.status,
+              previousGatewayResponse: payment.gatewayResponse,
+              status: PaymentStatus.REFUNDED,
+              gatewayResponse: JSON.stringify({
+                simulated: true,
+                refunded: true,
+                refundReason: reason,
+                timestamp: new Date().toISOString(),
+              }),
+            }
+          : undefined,
     });
+
+    const updatedOrder = await Order.findById(order._id)
+      .populate('payment')
+      .populate({ path: 'statusHistory', options: historyAscending });
 
     return sendSuccess(res, { order: updatedOrder }, 'Order cancelled successfully');
   } catch (err) {

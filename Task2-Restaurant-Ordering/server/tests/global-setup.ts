@@ -1,15 +1,15 @@
-import path from 'path';
-import { execSync } from 'child_process';
+import mongoose from 'mongoose';
+import { connectDatabase, disconnectDatabase } from '../src/db';
+import { seedDatabase } from '../src/seed/seed';
 
-// Applies migrations and the idempotent seed to the isolated test database only.
-// vitest.config.ts has already verified that TEST_DATABASE_URL is safe to use.
-export default function setup() {
-  const options = {
-    cwd: path.resolve(__dirname, '..'),
-    stdio: 'pipe' as const,
-    env: { ...process.env, DATABASE_URL: process.env.TEST_DATABASE_URL, NODE_ENV: 'test' },
-  };
+// Starts every run from a known state. vitest.config.ts has already verified that
+// MONGODB_TEST_URI is a separate test database, so clearing it here is safe.
+export default async function setup() {
+  await mongoose.connect(process.env.MONGODB_TEST_URI!, { serverSelectionTimeoutMS: 5000 });
+  await mongoose.connection.dropDatabase();
+  await mongoose.disconnect();
 
-  execSync('npx prisma migrate deploy', options);
-  execSync('npx tsx prisma/seed.ts', options);
+  await connectDatabase(process.env.MONGODB_TEST_URI!);
+  await seedDatabase();
+  await disconnectDatabase();
 }

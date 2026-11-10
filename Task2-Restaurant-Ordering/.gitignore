@@ -20,11 +20,9 @@ coverage/
 *.log
 npm-debug.log*
 
-# Vite / Prisma cache
+# Vite cache
 .vite/
 .cache/
-prisma/*.db
-prisma/*.db-journal
 
 # Local database dumps
 *.dump

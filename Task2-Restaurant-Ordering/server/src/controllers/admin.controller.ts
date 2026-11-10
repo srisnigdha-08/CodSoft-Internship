@@ -1,10 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import prisma from '../prisma';
-import { OrderStatus, Role } from '@prisma/client';
+import { Order, OrderStatus, Reservation, Role, User } from '../models';
 import { BadRequestError, NotFoundError } from '../utils/errors';
 import { sendSuccess } from '../utils/response';
 import { localDateString } from '../utils/date';
+import { containsInsensitive } from '../utils/ids';
 
 const adminOrdersQuerySchema = z.object({
   status: z.nativeEnum(OrderStatus).optional(),
@@ -15,49 +15,33 @@ const adminOrdersQuerySchema = z.object({
 
 export async function getAdminStats(req: Request, res: Response, next: NextFunction) {
   try {
-    const totalOrders = await prisma.order.count();
-    const activeOrders = await prisma.order.count({
-      where: {
-        status: { in: [OrderStatus.PENDING, OrderStatus.CONFIRMED, OrderStatus.PREPARING, OrderStatus.READY] },
-      },
-    });
-
-    const completedOrders = await prisma.order.findMany({
-      where: { status: OrderStatus.COMPLETED },
-      select: { totalAmount: true },
-    });
-
-    const totalRevenue = completedOrders.reduce((sum, o) => sum + Number(o.totalAmount), 0);
-
-    const todayStr = localDateString();
-    const todayReservations = await prisma.reservation.count({
-      where: { reservationDate: todayStr },
-    });
-
-    const totalCustomers = await prisma.user.count({
-      where: { role: Role.CUSTOMER },
-    });
-
-    // Top selling items by order items quantity
-    const orderItemsGrouped = await prisma.orderItem.groupBy({
-      by: ['name'],
-      where: { order: { status: { not: OrderStatus.CANCELLED } } },
-      _sum: { quantity: true, subtotal: true },
-      orderBy: { _sum: { quantity: 'desc' } },
-      take: 5,
-    });
-
-    const popularItems = orderItemsGrouped.map((item) => ({
-      name: item.name,
-      totalQuantity: item._sum.quantity || 0,
-      totalRevenue: item._sum.subtotal || 0,
-    }));
+    const [totalOrders, activeOrders, revenue, todayReservations, totalCustomers, popularItems] = await Promise.all([
+      Order.countDocuments(),
+      Order.countDocuments({
+        status: { $in: [OrderStatus.PENDING, OrderStatus.CONFIRMED, OrderStatus.PREPARING, OrderStatus.READY] },
+      }),
+      Order.aggregate<{ total: number }>([
+        { $match: { status: OrderStatus.COMPLETED } },
+        { $group: { _id: null, total: { $sum: '$totalAmount' } } },
+      ]),
+      Reservation.countDocuments({ reservationDate: localDateString() }),
+      User.countDocuments({ role: Role.CUSTOMER }),
+      // Top selling items by order items quantity
+      Order.aggregate<{ name: string; totalQuantity: number; totalRevenue: number }>([
+        { $match: { status: { $ne: OrderStatus.CANCELLED } } },
+        { $unwind: '$items' },
+        { $group: { _id: '$items.name', totalQuantity: { $sum: '$items.quantity' }, totalRevenue: { $sum: '$items.subtotal' } } },
+        { $sort: { totalQuantity: -1, _id: 1 } },
+        { $limit: 5 },
+        { $project: { _id: 0, name: '$_id', totalQuantity: 1, totalRevenue: 1 } },
+      ]),
+    ]);
 
     return sendSuccess(res, {
       stats: {
         totalOrders,
         activeOrders,
-        totalRevenue: Number(totalRevenue.toFixed(2)),
+        totalRevenue: Number((revenue[0]?.total ?? 0).toFixed(2)),
         todayReservations,
         totalCustomers,
         popularItems,
@@ -73,32 +57,18 @@ export async function getAdminOrders(req: Request, res: Response, next: NextFunc
     const { status, search, page: pageNum, limit: limitNum } = adminOrdersQuerySchema.parse(req.query);
     const skip = (pageNum - 1) * limitNum;
 
-    const where: any = {};
+    const where: Record<string, unknown> = {};
     if (status) {
       where.status = status;
     }
     if (search) {
-      const term = search;
-      where.OR = [
-        { orderNumber: { contains: term, mode: 'insensitive' } },
-        { customerName: { contains: term, mode: 'insensitive' } },
-        { customerEmail: { contains: term, mode: 'insensitive' } },
-      ];
+      const term = containsInsensitive(search);
+      where.$or = [{ orderNumber: term }, { customerName: term }, { customerEmail: term }];
     }
 
     const [total, orders] = await Promise.all([
-      prisma.order.count({ where }),
-      prisma.order.findMany({
-        where,
-        skip,
-        take: limitNum,
-        orderBy: { createdAt: 'desc' },
-        include: {
-          items: true,
-          payment: true,
-          table: true,
-        },
-      }),
+      Order.countDocuments(where),
+      Order.find(where).sort({ createdAt: -1, _id: -1 }).skip(skip).limit(limitNum).populate('payment').populate('table'),
     ]);
 
     return sendSuccess(res, {
@@ -117,22 +87,23 @@ export async function getAdminOrders(req: Request, res: Response, next: NextFunc
 
 export async function getAdminUsers(req: Request, res: Response, next: NextFunction) {
   try {
-    const users = await prisma.user.findMany({
-      orderBy: { createdAt: 'desc' },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        phone: true,
-        role: true,
-        createdAt: true,
-        _count: {
-          select: { orders: true, reservations: true },
-        },
-      },
-    });
+    const countBy = [{ $match: { customerId: { $ne: null } } }, { $group: { _id: '$customerId', count: { $sum: 1 } } }];
 
-    return sendSuccess(res, { users });
+    const [users, orderCounts, reservationCounts] = await Promise.all([
+      User.find().sort({ createdAt: -1 }),
+      Order.aggregate<{ _id: unknown; count: number }>(countBy),
+      Reservation.aggregate<{ _id: unknown; count: number }>(countBy),
+    ]);
+
+    const orders = new Map(orderCounts.map((c) => [String(c._id), c.count]));
+    const reservations = new Map(reservationCounts.map((c) => [String(c._id), c.count]));
+
+    return sendSuccess(res, {
+      users: users.map((user) => ({
+        ...user.toJSON(),
+        _count: { orders: orders.get(user.id) || 0, reservations: reservations.get(user.id) || 0 },
+      })),
+    });
   } catch (err) {
     next(err);
   }
@@ -152,25 +123,11 @@ export async function updateUserRole(req: Request, res: Response, next: NextFunc
       throw new BadRequestError('You cannot change your own role.');
     }
 
-    const user = await prisma.user.findUnique({
-      where: { id },
-    });
+    const updated = await User.findByIdAndUpdate(id, { role: validated.role }, { new: true, runValidators: true });
 
-    if (!user) {
+    if (!updated) {
       throw new NotFoundError('User not found');
     }
-
-    const updated = await prisma.user.update({
-      where: { id },
-      data: { role: validated.role },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        updatedAt: true,
-      },
-    });
 
     return sendSuccess(res, { user: updated }, `User role updated to ${validated.role}`);
   } catch (err) {

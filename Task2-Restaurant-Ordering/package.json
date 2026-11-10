@@ -4,12 +4,10 @@
   "description": "DineDesk — Restaurant Ordering and Table Management Platform (CodSoft Task 2)",
   "scripts": {
     "install:all": "npm --prefix server install && npm --prefix client install",
-    "db:generate": "npm --prefix server run prisma:generate",
-    "db:migrate": "npm --prefix server run prisma:deploy",
-    "db:seed": "npm --prefix server run prisma:seed",
+    "db:seed": "npm --prefix server run seed",
     "dev:server": "npm --prefix server run dev",
     "dev:client": "npm --prefix client run dev",
-    "test": "npm --prefix server run test",
+    "test": "npm --prefix server run test && npm --prefix client run test",
     "build": "npm --prefix server run build && npm --prefix client run build",
     "typecheck": "npm --prefix server run typecheck && npm --prefix client run typecheck"
   },

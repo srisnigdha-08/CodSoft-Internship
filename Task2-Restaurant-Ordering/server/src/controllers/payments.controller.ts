@@ -1,13 +1,15 @@
 import { Request, Response, NextFunction } from 'express';
+import { Types } from 'mongoose';
 import { z } from 'zod';
-import prisma from '../prisma';
-import { PaymentMethod, PaymentStatus, OrderStatus } from '@prisma/client';
+import { Order, OrderStatus, OrderStatusHistory, Payment, PaymentMethod, PaymentStatus } from '../models';
+import { runAtomic } from '../db';
 import { BadRequestError, NotFoundError } from '../utils/errors';
 import { sendSuccess } from '../utils/response';
 import { assertRecordAccess } from '../utils/access';
+import { isObjectIdString, objectIdSchema } from '../utils/ids';
 
 const checkoutPaymentSchema = z.object({
-  orderId: z.string().uuid('Invalid order ID'),
+  orderId: objectIdSchema('Invalid order ID'),
   method: z.nativeEnum(PaymentMethod),
   simulateFailure: z.boolean().optional().default(false),
 });
@@ -16,10 +18,7 @@ export async function processPaymentCheckout(req: Request, res: Response, next: 
   try {
     const validated = checkoutPaymentSchema.parse(req.body);
 
-    const order = await prisma.order.findUnique({
-      where: { id: validated.orderId },
-      include: { payment: true },
-    });
+    const order = await Order.findById(validated.orderId);
 
     if (!order) {
       throw new NotFoundError('Order not found');
@@ -35,42 +34,39 @@ export async function processPaymentCheckout(req: Request, res: Response, next: 
       throw new BadRequestError('Cannot process payment for a cancelled order.');
     }
 
-    if (order.payment && order.payment.status === PaymentStatus.SUCCESSFUL) {
+    const existingPayment = await Payment.findOne({ orderId: order._id });
+
+    if (existingPayment && existingPayment.status === PaymentStatus.SUCCESSFUL) {
       throw new BadRequestError('This order has already been paid successfully.');
     }
 
     const transactionRef = `TXN-DEV-${Date.now().toString().slice(-8)}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+    const newRecordFields = {
+      paymentNumber: `PAY-${Date.now().toString().slice(-6)}`,
+      amount: order.totalAmount,
+      customerId: order.customerId,
+    };
 
     // Handle failure simulation for robust QA and test coverage
     if (validated.simulateFailure) {
-      const failedPayment = await prisma.payment.upsert({
-        where: { orderId: order.id },
-        update: {
-          method: validated.method,
-          status: PaymentStatus.FAILED,
-          transactionRef,
-          gatewayResponse: JSON.stringify({
-            adapter: 'DineDesk Mock Payment Adapter',
-            verified: false,
-            reason: 'Card declined / simulation failure requested by client tester',
-            timestamp: new Date().toISOString(),
-          }),
+      const failedPayment = await Payment.findOneAndUpdate(
+        { orderId: order._id },
+        {
+          $set: {
+            method: validated.method,
+            status: PaymentStatus.FAILED,
+            transactionRef,
+            gatewayResponse: JSON.stringify({
+              adapter: 'DineDesk Mock Payment Adapter',
+              verified: false,
+              reason: 'Card declined / simulation failure requested by client tester',
+              timestamp: new Date().toISOString(),
+            }),
+          },
+          $setOnInsert: newRecordFields,
         },
-        create: {
-          paymentNumber: `PAY-${Date.now().toString().slice(-6)}`,
-          orderId: order.id,
-          amount: order.totalAmount,
-          method: validated.method,
-          status: PaymentStatus.FAILED,
-          transactionRef,
-          gatewayResponse: JSON.stringify({
-            adapter: 'DineDesk Mock Payment Adapter',
-            verified: false,
-            reason: 'Simulation failure requested by client tester',
-            timestamp: new Date().toISOString(),
-          }),
-        },
-      });
+        { upsert: true, new: true }
+      );
 
       return res.status(402).json({
         success: false,
@@ -80,62 +76,79 @@ export async function processPaymentCheckout(req: Request, res: Response, next: 
     }
 
     // Process successful payment simulation
-    const result = await prisma.$transaction(async (tx) => {
-      const payment = await tx.payment.upsert({
-        where: { orderId: order.id },
-        update: {
-          method: validated.method,
-          status: PaymentStatus.SUCCESSFUL,
-          transactionRef,
-          gatewayResponse: JSON.stringify({
-            adapter: 'DineDesk Mock Payment Adapter',
-            verified: true,
-            authCode: 'MOCK_AUTH_200',
-            currency: 'INR',
-            amount: Number(order.totalAmount),
-            timestamp: new Date().toISOString(),
-          }),
-        },
-        create: {
-          paymentNumber: `PAY-${Date.now().toString().slice(-6)}`,
-          orderId: order.id,
-          amount: order.totalAmount,
-          method: validated.method,
-          status: PaymentStatus.SUCCESSFUL,
-          transactionRef,
-          gatewayResponse: JSON.stringify({
-            adapter: 'DineDesk Mock Payment Adapter',
-            verified: true,
-            authCode: 'MOCK_AUTH_200',
-            currency: 'INR',
-            amount: Number(order.totalAmount),
-            timestamp: new Date().toISOString(),
-          }),
-        },
-      });
+    const historyId = new Types.ObjectId();
+    let orderConfirmed = false;
 
-      // Advance order status to CONFIRMED if it was PENDING
-      if (order.status === OrderStatus.PENDING) {
-        await tx.order.update({
-          where: { id: order.id },
-          data: {
-            status: OrderStatus.CONFIRMED,
-            statusHistory: {
-              create: {
+    const payment = await runAtomic(
+      async (session) => {
+        const saved = await Payment.findOneAndUpdate(
+          { orderId: order._id },
+          {
+            $set: {
+              method: validated.method,
+              status: PaymentStatus.SUCCESSFUL,
+              transactionRef,
+              gatewayResponse: JSON.stringify({
+                adapter: 'DineDesk Mock Payment Adapter',
+                verified: true,
+                authCode: 'MOCK_AUTH_200',
+                currency: 'INR',
+                amount: order.totalAmount,
+                timestamp: new Date().toISOString(),
+              }),
+            },
+            $setOnInsert: newRecordFields,
+          },
+          { upsert: true, new: true, session }
+        );
+
+        // Advance order status to CONFIRMED if it was PENDING
+        const { modifiedCount } = await Order.updateOne(
+          { _id: order._id, status: OrderStatus.PENDING },
+          { status: OrderStatus.CONFIRMED },
+          { session }
+        );
+        if (modifiedCount > 0) {
+          orderConfirmed = true;
+          await OrderStatusHistory.create(
+            [
+              {
+                _id: historyId,
+                orderId: order._id,
                 previousStatus: OrderStatus.PENDING,
                 newStatus: OrderStatus.CONFIRMED,
                 changedByUserId: req.user?.userId || null,
                 notes: `Payment confirmed via ${validated.method} (${transactionRef})`,
               },
-            },
-          },
-        });
+            ],
+            { session }
+          );
+        }
+
+        return saved;
+      },
+      async () => {
+        if (existingPayment) {
+          await Payment.updateOne(
+            { _id: existingPayment._id },
+            {
+              method: existingPayment.method,
+              status: existingPayment.status,
+              transactionRef: existingPayment.transactionRef,
+              gatewayResponse: existingPayment.gatewayResponse,
+            }
+          );
+        } else {
+          await Payment.deleteOne({ orderId: order._id });
+        }
+        if (orderConfirmed) {
+          await Order.updateOne({ _id: order._id, status: OrderStatus.CONFIRMED }, { status: OrderStatus.PENDING });
+          await OrderStatusHistory.deleteOne({ _id: historyId });
+        }
       }
+    );
 
-      return payment;
-    });
-
-    return sendSuccess(res, { payment: result }, 'Payment verified and processed successfully');
+    return sendSuccess(res, { payment }, 'Payment verified and processed successfully');
   } catch (err) {
     next(err);
   }
@@ -145,29 +158,21 @@ export async function getPaymentById(req: Request, res: Response, next: NextFunc
   try {
     const { id } = req.params;
 
-    const payment = await prisma.payment.findFirst({
-      where: {
-        OR: [{ id }, { paymentNumber: id }, { orderId: id }],
-      },
-      include: {
-        order: {
-          select: {
-            orderNumber: true,
-            customerName: true,
-            customerEmail: true,
-            totalAmount: true,
-            status: true,
-            customerId: true,
-          },
-        },
-      },
+    const conditions: Record<string, unknown>[] = [{ paymentNumber: id }];
+    if (isObjectIdString(id)) {
+      conditions.push({ _id: id }, { orderId: id });
+    }
+
+    const payment = await Payment.findOne({ $or: conditions }).populate({
+      path: 'order',
+      select: 'orderNumber customerName customerEmail totalAmount status customerId',
     });
 
     if (!payment) {
       throw new NotFoundError('Payment record not found');
     }
 
-    assertRecordAccess(req.user, payment.order.customerId, id === payment.id || id === payment.orderId);
+    assertRecordAccess(req.user, payment.customerId, id === payment.id || id === String(payment.orderId));
 
     return sendSuccess(res, { payment });
   } catch (err) {

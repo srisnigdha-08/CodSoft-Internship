@@ -106,7 +106,7 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
         </div>
 
         <div className="pt-8 flex flex-col sm:flex-row items-center justify-between text-xs text-stone-500 space-y-4 sm:space-y-0">
-          <p>© 2026 DineDesk Restaurant Platform. Built with React, TypeScript, Node.js & PostgreSQL.</p>
+          <p>© 2026 DineDesk Restaurant Platform. Built with React, TypeScript, Node.js & MongoDB.</p>
           <div className="flex items-center space-x-1">
             <span>Crafted for CodSoft Internship with</span>
             <Heart className="w-3.5 h-3.5 text-red-500 fill-red-500 inline" />

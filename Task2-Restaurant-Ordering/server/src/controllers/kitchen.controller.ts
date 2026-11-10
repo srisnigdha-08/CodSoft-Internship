@@ -1,9 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import prisma from '../prisma';
-import { OrderStatus, PaymentMethod, PaymentStatus } from '@prisma/client';
-import { BadRequestError, ConflictError, NotFoundError } from '../utils/errors';
+import { Order, OrderStatus, Payment, PaymentMethod, PaymentStatus } from '../models';
+import { transitionOrder } from '../services/orderTransitions';
+import { BadRequestError, NotFoundError } from '../utils/errors';
 import { sendSuccess } from '../utils/response';
+import { idOrField } from '../utils/ids';
 
 const validTransitions: Record<OrderStatus, OrderStatus[]> = {
   [OrderStatus.PENDING]: [OrderStatus.CONFIRMED, OrderStatus.CANCELLED],
@@ -27,46 +28,17 @@ export async function getKitchenOrders(req: Request, res: Response, next: NextFu
   try {
     const { status } = kitchenQuerySchema.parse(req.query);
 
-    const where: any = {};
-    if (status) {
-      where.status = status;
-    } else {
-      // By default, kitchen sees active orders that require preparation
-      where.status = {
-        in: [OrderStatus.PENDING, OrderStatus.CONFIRMED, OrderStatus.PREPARING, OrderStatus.READY],
-      };
-    }
+    const where = status
+      ? { status }
+      : // By default, kitchen sees active orders that require preparation
+        { status: { $in: [OrderStatus.PENDING, OrderStatus.CONFIRMED, OrderStatus.PREPARING, OrderStatus.READY] } };
 
-    const orders = await prisma.order.findMany({
-      where,
-      orderBy: { createdAt: 'asc' }, // FIFO: oldest orders first
-      include: {
-        items: {
-          include: {
-            menuItem: {
-              select: {
-                id: true,
-                name: true,
-                imageUrl: true,
-                preparationTimeMinutes: true,
-                isVegetarian: true,
-              },
-            },
-          },
-        },
-        table: true,
-        payment: {
-          select: {
-            method: true,
-            status: true,
-          },
-        },
-        statusHistory: {
-          orderBy: { createdAt: 'desc' },
-          take: 1,
-        },
-      },
-    });
+    const orders = await Order.find(where)
+      .sort({ createdAt: 1, _id: 1 }) // FIFO: oldest orders first
+      .populate({ path: 'items.menuItem', select: 'name imageUrl preparationTimeMinutes isVegetarian' })
+      .populate('table')
+      .populate({ path: 'payment', select: 'orderId method status' })
+      .populate({ path: 'statusHistory', options: { sort: { createdAt: -1, _id: -1 } }, perDocumentLimit: 1 });
 
     return sendSuccess(res, { orders });
   } catch (err) {
@@ -79,10 +51,7 @@ export async function updateOrderStatus(req: Request, res: Response, next: NextF
     const { id } = req.params;
     const validated = updateStatusSchema.parse(req.body);
 
-    const order = await prisma.order.findFirst({
-      where: { OR: [{ id }, { orderNumber: id }] },
-      include: { payment: true },
-    });
+    const order = await Order.findOne(idOrField(id, 'orderNumber'));
 
     if (!order) {
       throw new NotFoundError('Order not found');
@@ -99,58 +68,42 @@ export async function updateOrderStatus(req: Request, res: Response, next: NextF
       );
     }
 
-    const updatedOrder = await prisma.$transaction(async (tx) => {
-      // Conditional update: two staff clicks or a racing customer cancel cannot both succeed
-      const { count } = await tx.order.updateMany({
-        where: { id: order.id, status: currentStatus },
-        data: { status: targetStatus },
-      });
-      if (count === 0) {
-        throw new ConflictError('This order was just updated by someone else. Refresh and try again.');
+    const payment = await Payment.findOne({ orderId: order._id });
+
+    let paymentStatus: PaymentStatus | undefined;
+    if (payment) {
+      if (targetStatus === OrderStatus.CANCELLED && payment.status === PaymentStatus.SUCCESSFUL) {
+        paymentStatus = PaymentStatus.REFUNDED;
       }
-
-      await tx.orderStatusHistory.create({
-        data: {
-          orderId: order.id,
-          previousStatus: currentStatus,
-          newStatus: targetStatus,
-          changedByUserId: req.user?.userId || null,
-          notes: validated.notes || `Order advanced to ${targetStatus} by kitchen staff`,
-        },
-      });
-
-      if (order.payment) {
-        if (targetStatus === OrderStatus.CANCELLED && order.payment.status === PaymentStatus.SUCCESSFUL) {
-          await tx.payment.update({
-            where: { id: order.payment.id },
-            data: { status: PaymentStatus.REFUNDED },
-          });
-        }
-        // Completing a cash order means the cash was collected at handover
-        if (
-          targetStatus === OrderStatus.COMPLETED &&
-          order.payment.method === PaymentMethod.CASH &&
-          order.payment.status === PaymentStatus.PENDING
-        ) {
-          await tx.payment.update({
-            where: { id: order.payment.id },
-            data: { status: PaymentStatus.SUCCESSFUL },
-          });
-        }
+      // Completing a cash order means the cash was collected at handover
+      if (targetStatus === OrderStatus.COMPLETED && payment.method === PaymentMethod.CASH && payment.status === PaymentStatus.PENDING) {
+        paymentStatus = PaymentStatus.SUCCESSFUL;
       }
+    }
 
-      return tx.order.findUniqueOrThrow({
-        where: { id: order.id },
-        include: {
-          items: true,
-          table: true,
-          payment: true,
-          statusHistory: {
-            orderBy: { createdAt: 'desc' },
-          },
-        },
-      });
+    await transitionOrder({
+      orderId: order._id,
+      from: currentStatus,
+      to: targetStatus,
+      changedByUserId: req.user?.userId || null,
+      notes: validated.notes || `Order advanced to ${targetStatus} by kitchen staff`,
+      // Two staff clicks or a racing customer cancel cannot both succeed
+      conflictMessage: 'This order was just updated by someone else. Refresh and try again.',
+      payment:
+        payment && paymentStatus
+          ? {
+              id: payment._id,
+              previousStatus: payment.status,
+              previousGatewayResponse: payment.gatewayResponse,
+              status: paymentStatus,
+            }
+          : undefined,
     });
+
+    const updatedOrder = await Order.findById(order._id)
+      .populate('table')
+      .populate('payment')
+      .populate({ path: 'statusHistory', options: { sort: { createdAt: -1, _id: -1 } } });
 
     return sendSuccess(res, { order: updatedOrder }, `Order status updated to ${targetStatus}`);
   } catch (err) {

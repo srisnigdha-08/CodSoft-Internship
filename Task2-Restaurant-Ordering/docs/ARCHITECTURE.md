@@ -21,13 +21,13 @@
                                       │   (Node.js 22, TypeScript, Express 4)  │
                                       │              (Port 5050)               │
                                       └──────────────────┬─────────────────────┘
-                                                         │ Prisma ORM Client
-                                                         │ Parameterized SQL
+                                                         │ Mongoose ODM
+                                                         │ Validated documents
                                                          ▼
                                       ┌────────────────────────────────────────┐
-                                      │         PostgreSQL Database            │
-                                      │        (PostgreSQL, Port 5432)      │
-                                      │            "dinedesk_db"               │
+                                      │            MongoDB Database            │
+                                      │          (MongoDB, Port 27017)         │
+                                      │     "codsoft_restaurant_ordering"      │
                                       └────────────────────────────────────────┘
 ```
 
@@ -51,10 +51,11 @@
   - Strict customer ownership checks on orders and reservations.
 - **Centralized Error Handling:** Standardized error response format returning appropriate HTTP status codes (200, 201, 400, 401, 403, 404, 409, 500).
 
-### 2.3 Database Tier (PostgreSQL + Prisma ORM)
-- **Engine:** PostgreSQL (verified on 18.6).
-- **ORM:** Prisma Client with relational integrity, foreign key cascading, unique constraints, and ACID transactions.
-- **Reliability:** A partial unique index and row locks prevent double booking of an exact table slot, with atomic multi-table order creations (`Order`, `OrderItem`, `Payment`, `OrderStatusHistory`).
+### 2.3 Database Tier (MongoDB + Mongoose)
+- **Engine:** MongoDB (verified on 7.0).
+- **ODM:** Mongoose schemas with validation, timestamps, enums, ObjectId references, virtual populate and indexes. See [DATABASE_SCHEMA.md](DATABASE_SCHEMA.md).
+- **Connection:** `server/src/db.ts` connects, then waits until all indexes exist before the server accepts requests.
+- **Reliability:** A partial unique index prevents double booking of an exact table slot on any deployment. Related writes run in a transaction on a replica set, and use compensating clean-up on a standalone server.
 
 ---
 
@@ -62,12 +63,12 @@
 
 ### Module A: Customer-Facing Website & Ordering
 - **Menu Exploration:** Category tabs, search filtering, pure veg/non-veg dietary indicators, and dish quick-view modals.
-- **Server-Side Price Integrity:** Grand totals and line items are never trusted from the client; the Express backend queries PostgreSQL menu item prices directly and recalculates subtotals, 5% GST, and delivery fees.
+- **Server-Side Price Integrity:** Grand totals and line items are never trusted from the client; the Express backend reads current menu item prices from MongoDB and recalculates subtotals, 5% GST, and delivery fees.
 - **Dining Modes:** Dine-In with table allocation, Takeaway / Counter Pickup, and Doorstep Delivery.
 
 ### Module B: Table Reservations
 - Availability endpoint lists tables without an active booking at the exact date and time.
-- Booking transactions lock candidate tables with `SELECT ... FOR UPDATE`.
+- Auto-allocation tries each suitable table in turn, so requests that lose a race move to the next table.
 - A partial unique index guarantees one active reservation per table, date and time.
 - There is no dining duration, so different start times on one table do not conflict.
 
@@ -88,3 +89,23 @@
 - Payments are simulated in the controllers. No gateway is connected.
 - Automatic generation of unique payment identifiers (`PAY-XXXXXX`) and transaction references (`TXN-MOCK-XXXXXX`).
 - Failure simulation path for testing 402 declined payment workflows.
+
+---
+
+## 4. Key Flows
+
+**Authentication:** login verifies the bcrypt hash and sets a JWT in an HttpOnly cookie. Each request is verified by the `authenticate` or `optionalAuth` middleware. The JWT is never returned in JSON or stored in browser storage.
+
+**Authorization:** `authorize` checks the role on the server. Orders, payments and reservations also check ownership against the identity in the JWT, never against query parameters.
+
+**Cart:** held in React state and browser storage. It has no server collection, and prices shown there are estimates until checkout.
+
+**Checkout and order creation:** the client sends only dish ids, quantities and order details. The server loads current prices and availability from MongoDB, calculates subtotal, 5% GST, delivery fee and total, then saves the order, payment and first status history entries as one unit.
+
+**Payment simulation:** no gateway is connected and no card data is collected. Online methods succeed immediately, or record a failure when a decline is requested, and failed payments can be retried. Cash stays pending until the kitchen completes the order.
+
+**Kitchen Display:** the board polls every 4 seconds. Each change moves through `PENDING → CONFIRMED → PREPARING → READY → COMPLETED`, with `CANCELLED` allowed before completion. The update is conditional on the status that was read, so simultaneous changes cannot both succeed, and each change writes a history entry.
+
+**Reservations:** availability excludes tables already held at the exact date and time. The unique index makes the final decision. There is no duration or overlap rule.
+
+**Admin:** the dashboard aggregates live data. Administrators manage dishes, tables, reservations and user roles, and cannot change their own role.

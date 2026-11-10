@@ -1,11 +1,13 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import app from '../src/app';
-import prisma from '../src/prisma';
+import mongoose, { Types } from 'mongoose';
+import { connectDatabase, disconnectDatabase } from '../src/db';
+import { seedDatabase } from '../src/seed/seed';
+import { User, MenuCategory, MenuItem, RestaurantTable, Order, Reservation, Payment, OrderStatusHistory, Role, OrderStatus, PaymentStatus, ReservationStatus, RESERVATION_SLOT_INDEX } from '../src/models';
 import fs from 'fs';
 import path from 'path';
 import jwt from 'jsonwebtoken';
-import { Role, OrderStatus, PaymentStatus, ReservationStatus } from '@prisma/client';
 
 // The JWT is only delivered through the HttpOnly cookie, so tests read it from Set-Cookie
 function tokenFromResponse(res: request.Response): string {
@@ -38,7 +40,13 @@ describe('DineDesk Full Backend Test Suite', () => {
   let createdOrderId: string;
   let createdOrderNumber: string;
 
+  afterAll(async () => {
+    await disconnectDatabase();
+  });
+
   beforeAll(async () => {
+    await connectDatabase(process.env.MONGODB_URI!);
+
     // Obtain tokens by logging in with seed accounts
     const customerRes = await request(app)
       .post('/api/v1/auth/login')
@@ -56,21 +64,12 @@ describe('DineDesk Full Backend Test Suite', () => {
     kitchenToken = tokenFromResponse(kitchenRes);
 
     // Fetch a sample menu item and table
-    const menuItem = await prisma.menuItem.findFirst();
+    const menuItem = await MenuItem.findOne().sort({ sortOrder: 1, name: 1 });
     testMenuItemId = menuItem!.id;
 
-    const table = await prisma.restaurantTable.findFirst();
+    const table = await RestaurantTable.findOne({ tableNumber: 'T-01' });
     testTableId = table!.id;
 
-    // Clean up any previous test reservations to ensure test idempotency
-    await prisma.reservation.deleteMany({
-      where: {
-        OR: [
-          { customerEmail: { in: ['aarav@example.com', 'diff@example.com', 'concurrent1@example.com', 'concurrent2@example.com'] } },
-          { reservationDate: { in: [reservationDate, concurrentDate, guardDate, autoAllocateDate, customerCancelDate] } },
-        ],
-      },
-    });
   });
 
   // 1. Health check & CORS Security
@@ -78,7 +77,15 @@ describe('DineDesk Full Backend Test Suite', () => {
     it('GET /health - returns healthy status', async () => {
       const res = await request(app).get('/health');
       expect(res.status).toBe(200);
-      expect(res.body.status).toBe('healthy');
+      expect(res.body.status).toBe('ok');
+      expect(res.body.database).toBe('connected');
+    });
+
+    it('GET /api/health - verifies the database without exposing connection details', async () => {
+      const res = await request(app).get('/api/health');
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ status: 'ok', database: 'connected' });
+      expect(JSON.stringify(res.body)).not.toMatch(/mongodb:\/\//i);
     });
 
     it('CORS - allows requests from configured valid frontend origin', async () => {
@@ -497,8 +504,8 @@ describe('DineDesk Full Backend Test Suite', () => {
     });
 
     it('stores passwords as bcrypt hashes', async () => {
-      const user = await prisma.user.findUnique({ where: { email: 'customer@dinedesk.local' } });
-      expect(user!.password).toMatch(/^\$2[aby]\$/);
+      const user = await User.findOne({ email: 'customer@dinedesk.local' }).select('+passwordHash');
+      expect(user!.passwordHash).toMatch(/^\$2[aby]\$/);
     });
 
     it('rejects self-assigned roles at registration', async () => {
@@ -550,7 +557,7 @@ describe('DineDesk Full Backend Test Suite', () => {
       expect(promoted.status).toBe(200);
       expect(promoted.body.data.user.role).toBe('KITCHEN_STAFF');
 
-      const admin = await prisma.user.findUnique({ where: { email: 'admin@dinedesk.local' } });
+      const admin = await User.findOne({ email: 'admin@dinedesk.local' });
       const self = await request(app)
         .patch(`/api/v1/admin/users/${admin!.id}/role`)
         .set('Authorization', `Bearer ${adminToken}`)
@@ -575,7 +582,7 @@ describe('DineDesk Full Backend Test Suite', () => {
     let pickupOrderId: string;
 
     it('ignores client-supplied totals and prices', async () => {
-      const item = await prisma.menuItem.findUnique({ where: { id: testMenuItemId } });
+      const item = await MenuItem.findById(testMenuItemId);
       const res = await post({
         orderType: 'PICKUP',
         paymentMethod: 'MOCK_ONLINE',
@@ -617,12 +624,12 @@ describe('DineDesk Full Backend Test Suite', () => {
 
     it('rejects empty carts and unknown menu items', async () => {
       expect((await post({ orderType: 'PICKUP', items: [] })).status).toBe(400);
-      const unknown = await post({ orderType: 'PICKUP', items: [{ menuItemId: '00000000-0000-4000-8000-000000000000', quantity: 1 }] });
+      const unknown = await post({ orderType: 'PICKUP', items: [{ menuItemId: '000000000000000000000000', quantity: 1 }] });
       expect(unknown.status).toBe(400);
     });
 
     it('accepts the same dish on two lines and totals both', async () => {
-      const item = await prisma.menuItem.findUnique({ where: { id: testMenuItemId } });
+      const item = await MenuItem.findById(testMenuItemId);
       const res = await post({
         orderType: 'PICKUP',
         items: [
@@ -635,21 +642,21 @@ describe('DineDesk Full Backend Test Suite', () => {
     });
 
     it('rejects sold-out items', async () => {
-      const soldOut = await prisma.menuItem.findFirst({ where: { slug: 'artisan-cold-brew-coffee' } });
-      await prisma.menuItem.update({ where: { id: soldOut!.id }, data: { isAvailable: false } });
+      const soldOut = await MenuItem.findOne({ slug: 'artisan-cold-brew-coffee' });
+      await MenuItem.updateOne({ _id: soldOut!.id }, { isAvailable: false });
       try {
         const res = await post({ orderType: 'PICKUP', items: [{ menuItemId: soldOut!.id, quantity: 1 }] });
         expect(res.status).toBe(400);
         expect(res.body.message).toMatch(/sold out/i);
       } finally {
-        await prisma.menuItem.update({ where: { id: soldOut!.id }, data: { isAvailable: true } });
+        await MenuItem.updateOne({ _id: soldOut!.id }, { isAvailable: true });
       }
     });
 
     it('does not store a table on non dine-in orders, so bad IDs cannot cause a server error', async () => {
       const res = await post({
         orderType: 'PICKUP',
-        tableId: '00000000-0000-4000-8000-000000000000',
+        tableId: '000000000000000000000000',
         items: [{ menuItemId: testMenuItemId, quantity: 1 }],
       });
       expect(res.status).toBe(201);
@@ -676,24 +683,24 @@ describe('DineDesk Full Backend Test Suite', () => {
       const staff = { Authorization: `Bearer ${adminToken}` };
       const invalid = await request(app).post('/api/v1/menu').set(staff).send({ name: 'x', price: -5 });
       expect(invalid.status).toBe(400);
-      const badCategory = await request(app).patch(`/api/v1/menu/${testMenuItemId}`).set(staff).send({ categoryId: '00000000-0000-4000-8000-000000000000' });
+      const badCategory = await request(app).patch(`/api/v1/menu/${testMenuItemId}`).set(staff).send({ categoryId: '000000000000000000000000' });
       expect(badCategory.status).toBe(400);
     });
 
     it('accepts absolute image URLs and local image paths, but not protocol-relative URLs', async () => {
       const staff = { Authorization: `Bearer ${adminToken}` };
-      const dish = await prisma.menuItem.findUnique({ where: { slug: 'charred-malai-paneer-tikka' } });
+      const dish = await MenuItem.findOne({ slug: 'charred-malai-paneer-tikka' });
       const url = `/api/v1/menu/${dish!.id}`;
       expect(dish!.imageUrl).toBe('/images/charred-malai-paneer-tikka.svg');
       expect((await request(app).patch(url).set(staff).send({ imageUrl: dish!.imageUrl })).status).toBe(200);
       expect((await request(app).patch(url).set(staff).send({ imageUrl: 'https://example.com/dish.png' })).status).toBe(200);
       expect((await request(app).patch(url).set(staff).send({ imageUrl: '//example.com/dish.png' })).status).toBe(400);
       expect((await request(app).patch(url).set(staff).send({ imageUrl: 'not a url' })).status).toBe(400);
-      await prisma.menuItem.update({ where: { id: dish!.id }, data: { imageUrl: dish!.imageUrl } });
+      await MenuItem.updateOne({ _id: dish!.id }, { imageUrl: dish!.imageUrl });
     });
 
     it('every local image path used by a seeded dish exists in the frontend', async () => {
-      const dishes = await prisma.menuItem.findMany({ where: { imageUrl: { startsWith: '/images/' } } });
+      const dishes = await MenuItem.find({ imageUrl: /^\/images\// });
       expect(dishes.map((d) => d.slug).sort()).toEqual([
         'charred-malai-paneer-tikka',
         'saffron-rose-gulab-jamun',
@@ -706,7 +713,7 @@ describe('DineDesk Full Backend Test Suite', () => {
     });
 
     it('guest orders are not readable by their short order number', async () => {
-      const order = await prisma.order.findUnique({ where: { id: pickupOrderId } });
+      const order = await Order.findById(pickupOrderId);
       const byNumber = await request(app).get(`/api/v1/orders/${order!.orderNumber}`);
       expect(byNumber.status).toBe(404);
       const byUuid = await request(app).get(`/api/v1/orders/${order!.id}`);
@@ -745,7 +752,7 @@ describe('DineDesk Full Backend Test Suite', () => {
         expect(res.body.data.order.status).toBe(status);
       }
 
-      const final = await prisma.order.findUnique({ where: { id: order.id }, include: { payment: true, statusHistory: true } });
+      const final: any = await Order.findById(order.id).populate('payment').populate('statusHistory');
       expect(final!.payment!.status).toBe(PaymentStatus.SUCCESSFUL);
       expect(final!.statusHistory).toHaveLength(5);
     });
@@ -759,7 +766,7 @@ describe('DineDesk Full Backend Test Suite', () => {
       const order = await cashOrder();
       const results = await Promise.all([advance(order.id, 'CONFIRMED'), advance(order.id, 'CONFIRMED')]);
       expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
-      const history = await prisma.orderStatusHistory.count({ where: { orderId: order.id } });
+      const history = await OrderStatusHistory.countDocuments({ orderId: order.id });
       expect(history).toBe(2);
     });
 
@@ -848,7 +855,7 @@ describe('DineDesk Full Backend Test Suite', () => {
       expect(retry.status).toBe(200);
       expect(retry.body.data.payment.status).toBe(PaymentStatus.SUCCESSFUL);
 
-      const order = await prisma.order.findUnique({ where: { id: created.body.data.order.id } });
+      const order = await Order.findById(created.body.data.order.id);
       expect(order!.status).toBe(OrderStatus.CONFIRMED);
     });
 
@@ -905,7 +912,7 @@ describe('DineDesk Full Backend Test Suite', () => {
     });
 
     it('rejects a table too small for the party', async () => {
-      const small = await prisma.restaurantTable.findUnique({ where: { tableNumber: 'T-01' } });
+      const small = await RestaurantTable.findOne({ tableNumber: 'T-01' });
       const res = await request(app)
         .post('/api/v1/reservations')
         .send(body({ guestCount: 8, reservationDate: guardDate, reservationTime: '13:00', tableId: small!.id }));
@@ -913,7 +920,7 @@ describe('DineDesk Full Backend Test Suite', () => {
     });
 
     it('the database itself rejects a second active reservation for the same table and slot', async () => {
-      const table = await prisma.restaurantTable.findUnique({ where: { tableNumber: 'T-02' } });
+      const table = await RestaurantTable.findOne({ tableNumber: 'T-02' });
       const row = (n: string, status: ReservationStatus) => ({
         reservationNumber: `RES-GUARD-${n}-${Date.now()}`,
         customerName: 'Guard',
@@ -927,15 +934,15 @@ describe('DineDesk Full Backend Test Suite', () => {
       });
 
       // Bypasses the API on purpose: this proves the constraint, not the application check
-      await prisma.reservation.create({ data: row('A', ReservationStatus.CONFIRMED) });
-      await expect(prisma.reservation.create({ data: row('B', ReservationStatus.PENDING) })).rejects.toMatchObject({ code: 'P2002' });
+      await Reservation.create(row('A', ReservationStatus.CONFIRMED));
+      await expect(Reservation.create(row('B', ReservationStatus.PENDING))).rejects.toMatchObject({ code: 11000 });
 
       // Cancelled history does not occupy the slot
-      await prisma.reservation.create({ data: row('C', ReservationStatus.CANCELLED) });
+      await Reservation.create(row('C', ReservationStatus.CANCELLED));
     });
 
     it('a cancelled reservation cannot be revived into a slot that has been rebooked', async () => {
-      const table = await prisma.restaurantTable.findUnique({ where: { tableNumber: 'T-03' } });
+      const table = await RestaurantTable.findOne({ tableNumber: 'T-03' });
       const first = await request(app)
         .post('/api/v1/reservations')
         .send(body({ reservationDate: guardDate, reservationTime: '21:00', tableId: table!.id }));
@@ -989,6 +996,314 @@ describe('DineDesk Full Backend Test Suite', () => {
 
       const history = await request(app).get('/api/v1/reservations/my').set('Authorization', `Bearer ${customerToken}`);
       expect(history.body.data.reservations.some((r: any) => r.id === id)).toBe(true);
+    });
+  });
+
+  // 15. Catalog filtering against MongoDB
+  describe('Menu filtering', () => {
+    const menu = async (query: string) => (await request(app).get('/api/v1/menu' + query)).body.data.items as any[];
+
+    it('filters vegetarian=true and vegetarian=false on the stored field', async () => {
+      const [veg, nonVeg, all] = await Promise.all([menu('?vegetarian=true'), menu('?vegetarian=false'), menu('')]);
+      expect(veg.length).toBeGreaterThan(0);
+      expect(nonVeg.length).toBeGreaterThan(0);
+      expect(veg.every((i) => i.isVegetarian)).toBe(true);
+      expect(nonVeg.every((i) => !i.isVegetarian)).toBe(true);
+      expect(veg.length + nonVeg.length).toBe(all.length);
+    });
+
+    it('combines category and vegetarian filters', async () => {
+      const items = await menu('?category=starters&vegetarian=true');
+      expect(items.length).toBe(2);
+      expect(items.every((i) => i.category.slug === 'starters' && i.isVegetarian)).toBe(true);
+    });
+
+    it('returns nothing for an unknown category', async () => {
+      expect(await menu('?category=does-not-exist')).toEqual([]);
+    });
+
+    it('treats search text literally rather than as a regular expression', async () => {
+      expect((await menu('?search=paneer')).length).toBe(1);
+      expect(await menu('?search=' + encodeURIComponent('.*'))).toEqual([]);
+      expect((await request(app).get('/api/v1/menu?search=' + encodeURIComponent('('))).status).toBe(200);
+    });
+
+    it('exposes category item counts and a string id', async () => {
+      const res = await request(app).get('/api/v1/categories');
+      const starters = res.body.data.categories.find((c: any) => c.slug === 'starters');
+      expect(starters._count.items).toBe(4);
+      expect(starters.id).toMatch(/^[a-f\d]{24}$/);
+      expect(starters._id).toBeUndefined();
+    });
+
+    it('serves item details by id and by slug', async () => {
+      const byId = await request(app).get('/api/v1/menu/' + testMenuItemId);
+      const bySlug = await request(app).get('/api/v1/menu/' + byId.body.data.item.slug);
+      expect(bySlug.body.data.item.id).toBe(testMenuItemId);
+      expect(bySlug.body.data.item.category.name).toBeTruthy();
+    });
+
+    it('returns 404 for malformed and unknown item ids', async () => {
+      expect((await request(app).get('/api/v1/menu/not-a-real-id')).status).toBe(404);
+      expect((await request(app).get('/api/v1/menu/000000000000000000000000')).status).toBe(404);
+    });
+  });
+
+  // 16. Identity and data scoping
+  describe('Identity and scoping', () => {
+    it('rejects query-operator objects in login', async () => {
+      const res = await request(app).post('/api/v1/auth/login').send({ email: { $ne: null }, password: { $ne: null } });
+      expect(res.status).toBe(400);
+    });
+
+    it('rejects sessions issued before the MongoDB migration', async () => {
+      const token = jwt.sign({ userId: '4f1c2c9e-7a54-4a2e-9a7e-2f7b3f3f0a11', email: 'a@b.co', role: Role.ADMIN, name: 'Old' }, process.env.JWT_SECRET!);
+      expect((await request(app).get('/api/v1/auth/me').set('Authorization', 'Bearer ' + token)).status).toBe(401);
+    });
+
+    it('rejects duplicate registration with a conflict', async () => {
+      const res = await request(app).post('/api/v1/auth/register').send({ name: 'Dup', email: 'customer@dinedesk.local', password: 'Password@123' });
+      expect(res.status).toBe(409);
+    });
+
+    it('profile returns only the signed-in user and no password data', async () => {
+      const res = await request(app).get('/api/v1/auth/me?userId=000000000000000000000000').set('Authorization', 'Bearer ' + customerToken);
+      expect(res.body.data.user.email).toBe('customer@dinedesk.local');
+      expect(JSON.stringify(res.body)).not.toMatch(/password/i);
+    });
+
+    it('never returns password data in the admin user list', async () => {
+      const res = await request(app).get('/api/v1/admin/users').set('Authorization', 'Bearer ' + adminToken);
+      expect(JSON.stringify(res.body)).not.toMatch(/password/i);
+      expect(res.body.data.users[0]._count).toBeDefined();
+    });
+
+    it('order history ignores email and userId parameters', async () => {
+      const reg = await request(app).post('/api/v1/auth/register').send({ name: 'Scoped User', email: 'scoped_' + Date.now() + '@example.com', password: 'Password@123' });
+      const victim = await User.findOne({ email: 'customer@dinedesk.local' });
+      const orders = await request(app)
+        .get('/api/v1/orders/my?email=customer@dinedesk.local&userId=' + victim!.id)
+        .set('Authorization', 'Bearer ' + tokenFromResponse(reg));
+      expect(orders.status).toBe(200);
+      expect(orders.body.data.orders).toEqual([]);
+
+      const own = await request(app).get('/api/v1/orders/my').set('Authorization', 'Bearer ' + customerToken);
+      expect(own.body.data.orders.length).toBeGreaterThan(0);
+      expect(own.body.data.orders.every((o: any) => o.customerId === victim!.id)).toBe(true);
+      expect(own.body.data.orders[0].payment).toBeDefined();
+    });
+  });
+
+  // 17. Admin management
+  describe('Admin management', () => {
+    const staff = () => ({ Authorization: 'Bearer ' + adminToken });
+    const dishBody = (categoryId: string, slug: string) => ({
+      categoryId,
+      name: 'Audit Dish',
+      slug,
+      description: 'A dish created by the test suite.',
+      price: 123.5,
+      imageUrl: '/images/charred-malai-paneer-tikka.svg',
+    });
+
+    it('creates, updates and deletes categories, cascading to their dishes', async () => {
+      const created = await request(app).post('/api/v1/categories').set(staff()).send({ name: 'Test Specials', slug: 'test-specials' });
+      expect(created.status).toBe(201);
+      const categoryId = created.body.data.category.id;
+
+      const duplicate = await request(app).post('/api/v1/categories').set(staff()).send({ name: 'Test Specials', slug: 'test-specials-2' });
+      expect(duplicate.status).toBe(409);
+
+      const renamed = await request(app).patch('/api/v1/categories/' + categoryId).set(staff()).send({ description: 'Updated' });
+      expect(renamed.body.data.category.description).toBe('Updated');
+
+      const dish = await request(app).post('/api/v1/menu').set(staff()).send(dishBody(categoryId, 'cascade-dish'));
+      expect(dish.status).toBe(201);
+
+      expect((await request(app).delete('/api/v1/categories/' + categoryId).set(staff())).status).toBe(200);
+      expect(await MenuItem.exists({ slug: 'cascade-dish' })).toBeNull();
+    });
+
+    it('deleting a dish keeps past orders and clears their link', async () => {
+      const category = await MenuCategory.findOne({ slug: 'mains' });
+      const dish = await request(app).post('/api/v1/menu').set(staff()).send(dishBody(category!.id, 'short-lived-dish'));
+      const dishId = dish.body.data.item.id;
+      expect(dish.body.data.item.category.slug).toBe('mains');
+
+      const placed = await request(app).post('/api/v1/orders').send({
+        customerName: 'Keeper',
+        customerEmail: 'keeper@example.com',
+        customerPhone: '+91 98765 77777',
+        orderType: 'PICKUP',
+        paymentMethod: 'CASH',
+        items: [{ menuItemId: dishId, quantity: 2 }],
+      });
+      expect(placed.status).toBe(201);
+      expect(Number(placed.body.data.order.subtotal)).toBe(247);
+
+      expect((await request(app).delete('/api/v1/menu/' + dishId).set(staff())).status).toBe(200);
+      const stored = await Order.findById(placed.body.data.order.id);
+      expect(stored!.items[0].menuItemId).toBeNull();
+      expect(stored!.items[0].name).toBe('Audit Dish');
+    });
+
+    it('manages tables and refuses to delete one with an upcoming booking', async () => {
+      const created = await request(app).post('/api/v1/tables').set(staff()).send({ tableNumber: 'T-TEST', capacity: 4 });
+      expect(created.status).toBe(201);
+      const tableId = created.body.data.table.id;
+
+      const off = await request(app).patch('/api/v1/tables/' + tableId).set(staff()).send({ isActive: false });
+      expect(off.body.data.table.isActive).toBe(false);
+      await request(app).patch('/api/v1/tables/' + tableId).set(staff()).send({ isActive: true });
+
+      const booking = await request(app).post('/api/v1/reservations').send({
+        customerName: 'Table Tester',
+        customerEmail: 'table@example.com',
+        customerPhone: '+91 98765 88888',
+        guestCount: 2,
+        reservationDate: futureDate(20),
+        reservationTime: '18:00',
+        tableId,
+      });
+      expect(booking.status).toBe(201);
+      expect((await request(app).delete('/api/v1/tables/' + tableId).set(staff())).status).toBe(400);
+
+      await request(app).patch('/api/v1/reservations/' + booking.body.data.reservation.id + '/status').set(staff()).send({ status: 'CANCELLED' });
+      expect((await request(app).delete('/api/v1/tables/' + tableId).set(staff())).status).toBe(200);
+      expect(await RestaurantTable.exists({ tableNumber: 'T-TEST' })).toBeNull();
+    });
+
+    it('confirms and completes reservations, and lists all of them', async () => {
+      const booking = await request(app).post('/api/v1/reservations').send({
+        customerName: 'Flow Tester',
+        customerEmail: 'flow@example.com',
+        customerPhone: '+91 98765 99999',
+        guestCount: 2,
+        reservationDate: futureDate(22),
+        reservationTime: '18:30',
+      });
+      const id = booking.body.data.reservation.id;
+      expect(booking.body.data.reservation.table.tableNumber).toBeTruthy();
+      expect((await request(app).patch('/api/v1/reservations/' + id + '/status').set(staff()).send({ status: 'COMPLETED' })).body.data.reservation.status).toBe('COMPLETED');
+      expect((await request(app).patch('/api/v1/reservations/' + id + '/status').set(staff()).send({ status: 'CONFIRMED' })).status).toBe(400);
+
+      const list = await request(app).get('/api/v1/reservations?status=COMPLETED').set(staff());
+      expect(list.body.data.reservations.some((r: any) => r.id === id)).toBe(true);
+    });
+
+    it('searches and paginates the orders ledger and reports stats', async () => {
+      const search = await request(app).get('/api/v1/admin/orders?search=' + encodeURIComponent('priya') + '&limit=2').set(staff());
+      expect(search.status).toBe(200);
+      expect(search.body.data.orders.length).toBeLessThanOrEqual(2);
+      expect(search.body.data.pagination.total).toBeGreaterThan(0);
+
+      const stats = await request(app).get('/api/v1/admin/stats').set(staff());
+      expect(stats.body.data.stats.totalRevenue).toBeGreaterThan(0);
+      expect(stats.body.data.stats.popularItems.length).toBeGreaterThan(0);
+    });
+  });
+
+  // 18. MongoDB behaviour
+  describe('MongoDB behaviour', () => {
+    const orderBody = (email: string, extra: object = {}) => ({
+      customerName: 'Mongo Tester',
+      customerEmail: email,
+      customerPhone: '+91 98765 66666',
+      orderType: 'PICKUP',
+      paymentMethod: 'MOCK_ONLINE',
+      items: [{ menuItemId: testMenuItemId, quantity: 1 }],
+      ...extra,
+    });
+
+    it('stores references as ObjectIds and embeds line items', async () => {
+      const res = await request(app).post('/api/v1/orders').set('Authorization', 'Bearer ' + customerToken).send(orderBody('refs@example.com', { orderType: 'DINE_IN', tableId: testTableId }));
+      const raw = await Order.collection.findOne({ _id: new Types.ObjectId(res.body.data.order.id) });
+      expect(raw!.customerId).toBeInstanceOf(Types.ObjectId);
+      expect(raw!.tableId).toBeInstanceOf(Types.ObjectId);
+      expect(raw!.items[0].menuItemId).toBeInstanceOf(Types.ObjectId);
+      expect(res.body.data.order.items[0].orderId).toBe(res.body.data.order.id);
+      expect(res.body.data.order.table.id).toBe(testTableId);
+    });
+
+    it('links exactly one payment and a status history to each order', async () => {
+      const res = await request(app).post('/api/v1/orders').send(orderBody('links@example.com'));
+      const orderId = res.body.data.order.id;
+      expect(await Payment.countDocuments({ orderId })).toBe(1);
+      const history = await OrderStatusHistory.find({ orderId }).sort({ createdAt: 1, _id: 1 });
+      expect(history.map((h) => h.newStatus)).toEqual(['PENDING', 'CONFIRMED']);
+      expect(res.body.data.order.statusHistory).toHaveLength(2);
+      expect(res.body.data.order.payment.orderId).toBe(orderId);
+
+      const duplicate = Payment.create({ paymentNumber: 'PAY-DUP-' + Date.now(), orderId, amount: 1, method: 'CARD' });
+      await expect(duplicate).rejects.toMatchObject({ code: 11000 });
+    });
+
+    it('enforces unique email, slug and table number', async () => {
+      await expect(User.create({ email: 'CUSTOMER@dinedesk.local', passwordHash: 'x', name: 'Dup' })).rejects.toMatchObject({ code: 11000 });
+      const category = await MenuCategory.findOne();
+      await expect(MenuItem.create({ categoryId: category!._id, name: 'Dup', slug: 'butter-chicken-royale', description: 'Duplicate', price: 1, imageUrl: '/x.svg' })).rejects.toMatchObject({ code: 11000 });
+      await expect(RestaurantTable.create({ tableNumber: 'T-01', capacity: 2 })).rejects.toMatchObject({ code: 11000 });
+    });
+
+    it('validates documents at the schema level', async () => {
+      const order = new Order({ orderNumber: 'BAD', customerName: 'x', customerEmail: 'x@y.co', customerPhone: '1', subtotal: -1, tax: 0, totalAmount: 0, items: [] });
+      const error = order.validateSync();
+      expect(error?.errors.subtotal).toBeDefined();
+      expect(error?.errors.items).toBeDefined();
+    });
+
+    it('creates the expected indexes, including the partial double-booking guard', async () => {
+      const indexes = await Reservation.collection.indexes();
+      const guard = indexes.find((i) => i.name === RESERVATION_SLOT_INDEX)!;
+      expect(guard.unique).toBe(true);
+      expect(guard.partialFilterExpression).toEqual({ holdsSlot: true });
+
+      const orderIndexes = (await Order.collection.indexes()).map((i) => Object.keys(i.key).join(','));
+      expect(orderIndexes).toEqual(expect.arrayContaining(['customerId,createdAt', 'status,createdAt', 'orderType', 'createdAt']));
+      const itemIndexes = (await MenuItem.collection.indexes()).map((i) => Object.keys(i.key).join(','));
+      expect(itemIndexes).toEqual(expect.arrayContaining(['isVegetarian', 'isAvailable', 'name']));
+      expect(mongoose.connection.db!.databaseName).toMatch(/test/);
+    });
+
+    it('rolls back an order when its payment cannot be saved', async () => {
+      const spy = vi.spyOn(Payment, 'create').mockRejectedValueOnce(new Error('Simulated write failure'));
+      const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const res = await request(app).post('/api/v1/orders').send(orderBody('rollback@example.com'));
+        expect(res.status).toBe(500);
+        expect(JSON.stringify(res.body)).not.toMatch(/Simulated write failure/);
+      } finally {
+        spy.mockRestore();
+        quiet.mockRestore();
+      }
+      expect(await Order.countDocuments({ customerEmail: 'rollback@example.com' })).toBe(0);
+    });
+
+    it('rolls back a status change when its history cannot be saved', async () => {
+      const placed = await request(app).post('/api/v1/orders').send(orderBody('statusrollback@example.com'));
+      const orderId = placed.body.data.order.id;
+      const spy = vi.spyOn(OrderStatusHistory, 'create').mockRejectedValueOnce(new Error('Simulated write failure'));
+      const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const res = await request(app).patch('/api/v1/kitchen/orders/' + orderId + '/status').set('Authorization', 'Bearer ' + kitchenToken).send({ status: 'PREPARING' });
+        expect(res.status).toBe(500);
+      } finally {
+        spy.mockRestore();
+        quiet.mockRestore();
+      }
+      expect((await Order.findById(orderId))!.status).toBe('CONFIRMED');
+    });
+
+    it('seeding again changes nothing', async () => {
+      const counts = () => Promise.all([User, MenuCategory, MenuItem, RestaurantTable, Order, Payment, Reservation, OrderStatusHistory].map((m: any) => m.countDocuments()));
+      const before = await counts();
+      await seedDatabase();
+      expect(await counts()).toEqual(before);
+    });
+
+    it('seeded dishes keep their local image paths', async () => {
+      const dish = await MenuItem.findOne({ slug: 'saffron-rose-gulab-jamun' });
+      expect(dish!.imageUrl).toBe('/images/saffron-rose-gulab-jamun.svg');
     });
   });
 });

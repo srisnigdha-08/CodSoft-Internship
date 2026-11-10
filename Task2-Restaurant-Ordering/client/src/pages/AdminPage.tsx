@@ -385,7 +385,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigate }) => {
                 Menu Catalog Management
               </h2>
               <p className="text-xs text-stone-500">
-                Add, edit, change pricing, and toggle dish availability in PostgreSQL
+                Add, edit, change pricing, and toggle dish availability
               </p>
             </div>
 

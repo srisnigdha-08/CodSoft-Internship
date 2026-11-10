@@ -1,11 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
-import prisma from '../prisma';
+import { Role, User } from '../models';
 import { signToken } from '../utils/jwt';
 import { BadRequestError, UnauthorizedError, ConflictError } from '../utils/errors';
 import { sendCreated, sendSuccess } from '../utils/response';
-import { Role } from '@prisma/client';
 
 const registerSchema = z.object({
   name: z.string().min(2, 'Name must be at least 2 characters'),
@@ -23,9 +22,7 @@ export async function register(req: Request, res: Response, next: NextFunction) 
   try {
     const validated = registerSchema.parse(req.body);
 
-    const existingUser = await prisma.user.findUnique({
-      where: { email: validated.email },
-    });
+    const existingUser = await User.exists({ email: validated.email });
 
     if (existingUser) {
       throw new ConflictError('A user with this email already exists.');
@@ -34,22 +31,12 @@ export async function register(req: Request, res: Response, next: NextFunction) 
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(validated.password, salt);
 
-    const user = await prisma.user.create({
-      data: {
-        name: validated.name,
-        email: validated.email,
-        password: hashedPassword,
-        phone: validated.phone || null,
-        role: Role.CUSTOMER,
-      },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        phone: true,
-        role: true,
-        createdAt: true,
-      },
+    const user = await User.create({
+      name: validated.name,
+      email: validated.email,
+      passwordHash: hashedPassword,
+      phone: validated.phone || null,
+      role: Role.CUSTOMER,
     });
 
     const token = signToken({
@@ -77,15 +64,13 @@ export async function login(req: Request, res: Response, next: NextFunction) {
   try {
     const validated = loginSchema.parse(req.body);
 
-    const user = await prisma.user.findUnique({
-      where: { email: validated.email },
-    });
+    const user = await User.findOne({ email: validated.email }).select('+passwordHash');
 
     if (!user) {
       throw new UnauthorizedError('Invalid email or password.');
     }
 
-    const isMatch = await bcrypt.compare(validated.password, user.password);
+    const isMatch = await bcrypt.compare(validated.password, user.passwordHash);
     if (!isMatch) {
       throw new UnauthorizedError('Invalid email or password.');
     }
@@ -134,17 +119,7 @@ export async function getMe(req: Request, res: Response, next: NextFunction) {
       throw new UnauthorizedError('Not authenticated');
     }
 
-    const user = await prisma.user.findUnique({
-      where: { id: req.user.userId },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        phone: true,
-        role: true,
-        createdAt: true,
-      },
-    });
+    const user = await User.findById(req.user.userId);
 
     if (!user) {
       throw new UnauthorizedError('User account not found');

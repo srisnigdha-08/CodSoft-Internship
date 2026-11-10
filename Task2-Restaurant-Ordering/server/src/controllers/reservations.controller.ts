@@ -1,10 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import prisma from '../prisma';
-import { Prisma, ReservationStatus } from '@prisma/client';
+import { Reservation, ReservationStatus, RestaurantTable, RESERVATION_SLOT_INDEX } from '../models';
 import { BadRequestError, ForbiddenError, NotFoundError, ConflictError } from '../utils/errors';
 import { sendCreated, sendSuccess } from '../utils/response';
 import { isRealCalendarDate } from '../utils/date';
+import { idOrField, objectIdSchema } from '../utils/ids';
 
 const dateField = z
   .string()
@@ -12,13 +12,12 @@ const dateField = z
   .refine(isRealCalendarDate, 'Date is not a valid calendar date');
 const timeField = z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/, 'Time must be formatted as HH:mm (e.g. 19:30)');
 
-// Enforced by the partial unique index reservations_active_table_slot_key
+const ACTIVE_STATUSES = [ReservationStatus.PENDING, ReservationStatus.CONFIRMED];
+
+// Enforced by the partial unique index on active reservations
 function isSlotConflict(err: unknown) {
-  return (
-    err instanceof Prisma.PrismaClientKnownRequestError &&
-    err.code === 'P2002' &&
-    /reservationDate|reservations_active_table_slot/.test(JSON.stringify(err.meta))
-  );
+  const error = err as { code?: number; keyPattern?: Record<string, unknown>; message?: string };
+  return error?.code === 11000 && (Boolean(error.keyPattern?.reservationDate) || Boolean(error.message?.includes(RESERVATION_SLOT_INDEX)));
 }
 
 const SLOT_TAKEN_MESSAGE = 'The selected table is already reserved for this date and time slot.';
@@ -37,7 +36,7 @@ const createReservationSchema = z.object({
   guestCount: z.number().int().min(1, 'Guest count must be at least 1').max(20, 'For groups larger than 20, please contact events directly'),
   reservationDate: dateField,
   reservationTime: timeField,
-  tableId: z.string().uuid().optional().nullable(),
+  tableId: objectIdSchema('Invalid table ID').optional().nullable(),
   specialRequests: z.string().max(500).optional().nullable(),
 });
 
@@ -62,27 +61,17 @@ export async function checkAvailability(req: Request, res: Response, next: NextF
     const { date, time, guestCount: guests } = availabilityQuerySchema.parse(req.query);
 
     // Get all active tables with capacity >= guests
-    const tables = await prisma.restaurantTable.findMany({
-      where: {
-        isActive: true,
-        capacity: { gte: guests },
-      },
-      orderBy: { capacity: 'asc' },
-    });
+    const tables = await RestaurantTable.find({ isActive: true, capacity: { $gte: guests } }).sort({ capacity: 1, tableNumber: 1 });
 
     // A table is unavailable only for the exact same date and time slot (no duration overlap check)
-    const bookedReservations = await prisma.reservation.findMany({
-      where: {
-        reservationDate: date,
-        reservationTime: time,
-        status: { in: [ReservationStatus.PENDING, ReservationStatus.CONFIRMED] },
-        tableId: { not: null },
-      },
-      select: { tableId: true },
-    });
+    const bookedReservations = await Reservation.find({
+      reservationDate: date,
+      reservationTime: time,
+      status: { $in: ACTIVE_STATUSES },
+      tableId: { $ne: null },
+    }).select('tableId');
 
-    const bookedTableIds = new Set(bookedReservations.map((r) => r.tableId));
-
+    const bookedTableIds = new Set(bookedReservations.map((r) => String(r.tableId)));
     const availableTables = tables.filter((table) => !bookedTableIds.has(table.id));
 
     return sendSuccess(res, {
@@ -107,102 +96,67 @@ export async function createReservation(req: Request, res: Response, next: NextF
       throw new BadRequestError('Reservations must be for a future date and time.');
     }
 
-    const customerId = req.user?.userId || null;
     const reservationNumber = `RES-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
 
-    // Row locks serialize competing requests; the partial unique index is the final database-level guard
-    const reservation = await prisma.$transaction(async (tx) => {
-      let allocatedTableId = validated.tableId;
-
-      if (allocatedTableId) {
-        // Acquire row-level lock on the table to serialize concurrent booking requests
-        await tx.$queryRaw`SELECT id FROM "restaurant_tables" WHERE id = ${allocatedTableId} FOR UPDATE`;
-
-        // Verify requested table exists and meets capacity
-        const table = await tx.restaurantTable.findUnique({
-          where: { id: allocatedTableId },
-        });
-
-        if (!table || !table.isActive) {
-          throw new BadRequestError('The selected table is currently not available.');
-        }
-
-        if (table.capacity < validated.guestCount) {
-          throw new BadRequestError(`Selected table capacity (${table.capacity}) is insufficient for ${validated.guestCount} guests.`);
-        }
-
-        // Verify table is not already booked at this date and time
-        const conflict = await tx.reservation.findFirst({
-          where: {
-            tableId: allocatedTableId,
-            reservationDate: validated.reservationDate,
-            reservationTime: validated.reservationTime,
-            status: { in: [ReservationStatus.PENDING, ReservationStatus.CONFIRMED] },
-          },
-        });
-
-        if (conflict) {
-          throw new ConflictError(SLOT_TAKEN_MESSAGE);
-        }
-      } else {
-        // Auto-allocate best fitting table
-        const eligibleTables = await tx.restaurantTable.findMany({
-          where: {
-            isActive: true,
-            capacity: { gte: validated.guestCount },
-          },
-          orderBy: { capacity: 'asc' },
-        });
-
-        if (eligibleTables.length === 0) {
-          throw new ConflictError('No tables with sufficient capacity are available for this party size.');
-        }
-
-        // Acquire row-level lock on candidate tables to serialize concurrent allocations
-        const candidateIds = eligibleTables.map((t) => t.id);
-        await tx.$queryRaw`SELECT id FROM "restaurant_tables" WHERE id = ANY(${candidateIds}) ORDER BY id FOR UPDATE`;
-
-        const booked = await tx.reservation.findMany({
-          where: {
-            tableId: { in: candidateIds },
-            reservationDate: validated.reservationDate,
-            reservationTime: validated.reservationTime,
-            status: { in: [ReservationStatus.PENDING, ReservationStatus.CONFIRMED] },
-          },
-          select: { tableId: true },
-        });
-
-        const bookedIds = new Set(booked.map((b) => b.tableId));
-        const freeTable = eligibleTables.find((t) => !bookedIds.has(t.id));
-
-        if (!freeTable) {
-          throw new ConflictError('No tables with sufficient capacity are available for this date and time. Please select another slot.');
-        }
-
-        allocatedTableId = freeTable.id;
-      }
-
-      const newReservation = await tx.reservation.create({
-        data: {
-          reservationNumber,
-          customerId,
-          customerName: validated.customerName,
-          customerEmail: validated.customerEmail,
-          customerPhone: validated.customerPhone,
-          guestCount: validated.guestCount,
-          reservationDate: validated.reservationDate,
-          reservationTime: validated.reservationTime,
-          tableId: allocatedTableId,
-          specialRequests: validated.specialRequests || null,
-          status: ReservationStatus.CONFIRMED, // Auto-confirmed on successful allocation
-        },
-        include: {
-          table: true,
-        },
+    const insertFor = (tableId: unknown) =>
+      Reservation.create({
+        reservationNumber,
+        customerId: req.user?.userId || null,
+        customerName: validated.customerName,
+        customerEmail: validated.customerEmail,
+        customerPhone: validated.customerPhone,
+        guestCount: validated.guestCount,
+        reservationDate: validated.reservationDate,
+        reservationTime: validated.reservationTime,
+        tableId,
+        specialRequests: validated.specialRequests || null,
+        status: ReservationStatus.CONFIRMED, // Auto-confirmed on successful allocation
       });
 
-      return newReservation;
-    });
+    let created;
+
+    if (validated.tableId) {
+      const table = await RestaurantTable.findById(validated.tableId);
+
+      if (!table || !table.isActive) {
+        throw new BadRequestError('The selected table is currently not available.');
+      }
+
+      if (table.capacity < validated.guestCount) {
+        throw new BadRequestError(`Selected table capacity (${table.capacity}) is insufficient for ${validated.guestCount} guests.`);
+      }
+
+      // The unique index rejects the insert if the table is already held for this exact slot
+      created = await insertFor(table._id);
+    } else {
+      // Auto-allocate best fitting table
+      const eligibleTables = await RestaurantTable.find({
+        isActive: true,
+        capacity: { $gte: validated.guestCount },
+      }).sort({ capacity: 1, tableNumber: 1 });
+
+      if (eligibleTables.length === 0) {
+        throw new ConflictError('No tables with sufficient capacity are available for this party size.');
+      }
+
+      // Try each table in turn. Concurrent requests that lose a table move on to the next one.
+      for (const table of eligibleTables) {
+        try {
+          created = await insertFor(table._id);
+          break;
+        } catch (err) {
+          if (!isSlotConflict(err)) {
+            throw err;
+          }
+        }
+      }
+
+      if (!created) {
+        throw new ConflictError('No tables with sufficient capacity are available for this date and time. Please select another slot.');
+      }
+    }
+
+    const reservation = await Reservation.findById(created._id).populate('table');
 
     return sendCreated(res, { reservation }, 'Table reservation confirmed successfully');
   } catch (err) {
@@ -212,13 +166,9 @@ export async function createReservation(req: Request, res: Response, next: NextF
 
 export async function getMyReservations(req: Request, res: Response, next: NextFunction) {
   try {
-    const reservations = await prisma.reservation.findMany({
-      where: { customerId: req.user!.userId },
-      orderBy: [{ reservationDate: 'desc' }, { reservationTime: 'desc' }],
-      include: {
-        table: true,
-      },
-    });
+    const reservations = await Reservation.find({ customerId: req.user!.userId })
+      .sort({ reservationDate: -1, reservationTime: -1 })
+      .populate('table');
 
     return sendSuccess(res, { reservations });
   } catch (err) {
@@ -230,7 +180,7 @@ export async function getAllReservations(req: Request, res: Response, next: Next
   try {
     const { date, status } = reservationListQuerySchema.parse(req.query);
 
-    const where: any = {};
+    const where: Record<string, unknown> = {};
     if (date) {
       where.reservationDate = date;
     }
@@ -238,16 +188,10 @@ export async function getAllReservations(req: Request, res: Response, next: Next
       where.status = status;
     }
 
-    const reservations = await prisma.reservation.findMany({
-      where,
-      orderBy: [{ reservationDate: 'asc' }, { reservationTime: 'asc' }],
-      include: {
-        table: true,
-        customer: {
-          select: { name: true, email: true, phone: true },
-        },
-      },
-    });
+    const reservations = await Reservation.find(where)
+      .sort({ reservationDate: 1, reservationTime: 1 })
+      .populate('table')
+      .populate({ path: 'customer', select: 'name email phone' });
 
     return sendSuccess(res, { reservations });
   } catch (err) {
@@ -260,9 +204,7 @@ export async function updateReservationStatus(req: Request, res: Response, next:
     const { id } = req.params;
     const validated = updateReservationStatusSchema.parse(req.body);
 
-    const reservation = await prisma.reservation.findFirst({
-      where: { OR: [{ id }, { reservationNumber: id }] },
-    });
+    const reservation = await Reservation.findOne(idOrField(id, 'reservationNumber'));
 
     if (!reservation) {
       throw new NotFoundError('Reservation not found');
@@ -275,16 +217,14 @@ export async function updateReservationStatus(req: Request, res: Response, next:
       throw new BadRequestError(`Invalid status transition: Cannot move reservation from "${reservation.status}" to "${validated.status}".`);
     }
 
-    const updated = await prisma.reservation.update({
-      where: { id: reservation.id },
-      data: {
-        status: validated.status,
-        specialRequests: validated.specialRequests !== undefined ? validated.specialRequests : reservation.specialRequests,
-      },
-      include: { table: true },
-    });
+    reservation.status = validated.status;
+    if (validated.specialRequests !== undefined) {
+      reservation.specialRequests = validated.specialRequests;
+    }
+    await reservation.save();
+    await reservation.populate('table');
 
-    return sendSuccess(res, { reservation: updated }, `Reservation status updated to ${validated.status}`);
+    return sendSuccess(res, { reservation }, `Reservation status updated to ${validated.status}`);
   } catch (err) {
     next(isSlotConflict(err) ? new ConflictError(SLOT_TAKEN_MESSAGE) : err);
   }
@@ -294,15 +234,13 @@ export async function cancelMyReservation(req: Request, res: Response, next: Nex
   try {
     const { id } = req.params;
 
-    const reservation = await prisma.reservation.findFirst({
-      where: { OR: [{ id }, { reservationNumber: id }] },
-    });
+    const reservation = await Reservation.findOne(idOrField(id, 'reservationNumber'));
 
     if (!reservation) {
       throw new NotFoundError('Reservation not found');
     }
 
-    if (reservation.customerId !== req.user!.userId) {
+    if (String(reservation.customerId) !== req.user!.userId) {
       throw new ForbiddenError('You can only cancel your own reservations.');
     }
 
@@ -310,13 +248,11 @@ export async function cancelMyReservation(req: Request, res: Response, next: Nex
       throw new BadRequestError(`Cannot cancel a reservation in "${reservation.status}" status.`);
     }
 
-    const updated = await prisma.reservation.update({
-      where: { id: reservation.id },
-      data: { status: ReservationStatus.CANCELLED },
-      include: { table: true },
-    });
+    reservation.status = ReservationStatus.CANCELLED;
+    await reservation.save();
+    await reservation.populate('table');
 
-    return sendSuccess(res, { reservation: updated }, 'Reservation cancelled successfully');
+    return sendSuccess(res, { reservation }, 'Reservation cancelled successfully');
   } catch (err) {
     next(err);
   }

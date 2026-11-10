@@ -5,8 +5,8 @@
 [![Vite](https://img.shields.io/badge/Vite-5.x-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind-3.x-38B2AC?logo=tailwind-css&logoColor=white)](https://tailwindcss.com/)
 [![Express](https://img.shields.io/badge/Express-4.x-000000?logo=express&logoColor=white)](https://expressjs.com/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![Prisma ORM](https://img.shields.io/badge/Prisma-5.22-2D3748?logo=prisma&logoColor=white)](https://www.prisma.io/)
+[![MongoDB](https://img.shields.io/badge/MongoDB-47A248?logo=mongodb&logoColor=white)](https://www.mongodb.com/)
+[![Mongoose](https://img.shields.io/badge/Mongoose-8.x-880000?logo=mongoose&logoColor=white)](https://mongoosejs.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A full-stack restaurant ordering and table reservation application built for the **CodSoft Full Stack Web Development Internship (Task 2)**. Customers browse a menu, place dine-in, pickup or delivery orders, and book tables. Kitchen staff work through an order queue, and administrators manage the menu, tables, reservations and user roles.
@@ -51,30 +51,31 @@ Guests can order and reserve without an account. Order history, reservation hist
 |---|---|
 | Frontend | React 18, TypeScript 5, Vite 5, Tailwind CSS 3, Lucide icons |
 | Backend | Node.js, Express 4, TypeScript 5, Zod validation |
-| Database | PostgreSQL with Prisma ORM 5.22 and Prisma Migrate |
+| Database | MongoDB with Mongoose 8 |
 | Authentication | JWT in an HttpOnly cookie, bcrypt password hashing (`bcryptjs`), role-based authorization |
-| Testing | Vitest and Supertest (backend integration tests) |
+| Testing | Vitest and Supertest (backend), Vitest and Testing Library (frontend) |
 
-Verified with Node.js 24 and PostgreSQL 18.
+Verified with Node.js 24 and MongoDB 7.0.
 
 ---
 
 ## Architecture Overview
 
 ```text
-Browser (React SPA, :3000) --/api proxy--> Express REST API (:5050) --Prisma--> PostgreSQL
+Browser (React SPA, :3000) --/api proxy--> Express REST API (:5050) --Mongoose--> MongoDB
 ```
 
 - **Frontend:** a single-page app using React state for navigation, so pages have no individual URLs. Refreshing the browser returns to the Home page while the login session and cart are kept.
 - **API:** `routes → middleware (authenticate, authorize) → controllers`. Controllers validate input with Zod and use transactions for multi-step writes.
 - **Order tracking:** HTTP polling every 4 seconds. The project does not use WebSockets or Server-Sent Events.
+- **Data:** line items are embedded in their order. Payments, status history and reservations are separate collections linked by ObjectId. See [docs/DATABASE_SCHEMA.md](docs/DATABASE_SCHEMA.md).
 
 ```text
 Task2-Restaurant-Ordering/
 ├── client/src/       # components, context (Auth, Cart), pages, services/api.ts, types
 ├── server/
-│   ├── prisma/       # schema.prisma, migrations/, seed.ts
-│   ├── src/          # controllers, middleware, routes, utils, app.ts, config.ts, server.ts
+│   ├── src/models/   # Mongoose schemas and enums
+│   ├── src/          # controllers, middleware, routes, services, seed, scripts, utils, db.ts, app.ts, server.ts
 │   └── tests/        # api.test.ts, global-setup.ts
 ├── docs/             # architecture, API, database, testing, demo script, screenshots guide
 ├── .env.example
@@ -89,7 +90,7 @@ Further reading: [Architecture](docs/ARCHITECTURE.md), [API specification](docs/
 
 ### Prerequisites
 - Node.js 20 or newer, and npm.
-- A running PostgreSQL server.
+- A running MongoDB server (4.4 or newer; verified on 7.0).
 
 ### 1. Install dependencies
 ```powershell
@@ -109,32 +110,23 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `DATABASE_URL` | Yes | PostgreSQL connection string for the application |
+| `MONGODB_URI` | Yes | MongoDB connection string for the application. The server refuses to start without it |
 | `JWT_SECRET` | Yes | Signs JWTs. The server refuses to start without it |
 | `COOKIE_SECRET` | Yes | Passed to `cookie-parser`. The server refuses to start without it |
 | `FRONTEND_ORIGIN` | Yes | The one browser origin allowed by CORS. Use `http://localhost:3000` locally |
-| `TEST_DATABASE_URL` | For tests | A separate database whose name contains `test` |
+| `MONGODB_TEST_URI` | For tests | A separate database whose name contains `test` |
 | `JWT_EXPIRES_IN` | No | Token lifetime, default `7d` |
 | `PORT` | No | API port, default `5050` |
 | `NODE_ENV` | No | `development` or `production` |
 
 `.env` files are git-ignored. Never commit real credentials.
 
-### 3. Create the database and seed demo data
-Create an empty database matching `DATABASE_URL`, then run:
+### 3. Seed demo data
 ```powershell
-npm run db:migrate
 npm run db:seed
 ```
 
-`db:migrate` runs `prisma migrate deploy`, which only applies pending migrations. The seed is safe to re-run and refuses to run when `NODE_ENV=production`.
-
-**Upgrading a database created earlier with `prisma db push`:** mark the baseline as already applied, then deploy the rest. Existing rows are kept. The second migration fails if the table already contains duplicate active bookings for the same table and slot, and those must be resolved first.
-```powershell
-cd server
-npx prisma migrate resolve --applied 20261110000000_init
-npx prisma migrate deploy
-```
+MongoDB creates the `codsoft_restaurant_ordering` database on first use, and the indexes are built when the app connects. The seed is fictional, safe to re-run, and refuses to run when `NODE_ENV=production`.
 
 ### 4. Run the app
 In two terminals:
@@ -192,15 +184,15 @@ Base path: `/api/v1`. Full details are in [docs/API_SPECIFICATION.md](docs/API_S
 
 ## Testing and Building
 
-The backend tests write and delete rows, so they run against a separate database. `npm test` stops with an error unless `TEST_DATABASE_URL` is set, its database name contains `test`, and it differs from `DATABASE_URL`. Before the tests run, migrations and the seed are applied to that test database only.
+The backend tests write and delete data, so they run against a separate database. They stop with an error unless `MONGODB_TEST_URI` is set, its database name contains `test`, and it differs from `MONGODB_URI`. Before the tests run, that test database only is cleared and seeded.
 
 ```powershell
-npm run test        # backend integration tests
+npm run test        # backend integration tests, then frontend tests
 npm run typecheck   # server and client TypeScript checks
 npm run build       # server and client production builds
 ```
 
-There are no automated frontend tests and no lint configuration. See [docs/TESTING_REPORT.md](docs/TESTING_REPORT.md) for the latest results.
+No lint configuration exists. See [docs/TESTING_REPORT.md](docs/TESTING_REPORT.md) for the latest results.
 
 ---
 
@@ -211,13 +203,31 @@ There are no automated frontend tests and no lint configuration. See [docs/TESTI
 - `JWT_SECRET` and `COOKIE_SECRET` have no fallback. The server refuses to start if either is missing, and rejects short or placeholder values in production.
 - Role checks run on the server. Registration always creates a `CUSTOMER`.
 - CORS allows only `FRONTEND_ORIGIN`, with credentials. Requests without an `Origin` header (curl, server-to-server) are not blocked by CORS, so they rely on authentication.
-- Account orders and reservations are visible only to their owner and staff. A guest order is reachable only through its unguessable UUID, which works like a private link.
-- Zod validates request bodies and important query parameters on the server. Prisma parameterizes database queries.
+- Account orders and reservations are visible only to their owner and staff. A guest order is reachable only through its random 96-bit id, which works like a private link.
+- Zod validates request bodies and important query parameters on the server, so query operators cannot be injected, and search text is escaped before use.
 
 ### Reservation double-booking protection
-Double booking is prevented at the database level. A partial unique index, `reservations_active_table_slot_key`, allows only one `PENDING` or `CONFIRMED` reservation per table, date and time. Booking transactions also lock the candidate table rows with `SELECT ... FOR UPDATE`, so competing requests are handled one at a time and receive a clean `409 Conflict`.
+Double booking is prevented at the database level. A partial unique index, `reservations_active_table_slot`, allows only one `PENDING` or `CONFIRMED` reservation per table, date and time. It works on standalone servers and replica sets alike, and a request that loses the race receives a clean `409 Conflict`.
 
 The guarantee covers the **exact same date and time slot**. See the first limitation below.
+
+### Transactions
+On a replica set or sharded cluster, an order with its payment and history, each status change, and each payment confirmation are saved in a real MongoDB transaction. A standalone server, including a default local install, does not support transactions. There the app performs the same writes in sequence and undoes them if one fails, which covers application-level failures but not a crash partway through. Run MongoDB as a replica set for full atomicity. The server logs a warning at startup when transactions are unavailable.
+
+---
+
+## Migrating Existing PostgreSQL Data
+
+Earlier versions of DineDesk used PostgreSQL. The application no longer needs it, but a one-time tool can copy an existing database into MongoDB. It only reads PostgreSQL, using a read-only session through the `psql` client, and validates counts, totals and references afterwards.
+
+Run it from `server/` with a target database in `MONGODB_URI`. Start with a dry run:
+```powershell
+$env:POSTGRES_MIGRATION_URL = "postgresql://USER:PASSWORD@localhost:5432/dinedesk_db"
+npm run migrate:postgres -- --dry-run
+npm run migrate:postgres
+```
+
+The target must be empty, so run the migration instead of the seed. Re-running needs `--allow-existing` and is safe. Set `PSQL_PATH` if `psql` is not on your PATH. Existing passwords keep working, but users must sign in again because old sessions are no longer valid.
 
 ---
 
@@ -232,7 +242,8 @@ The guarantee covers the **exact same date and time slot**. See the first limita
 7. **No page URLs:** refresh returns to Home, and pages cannot be bookmarked or shared.
 8. **No profile page:** the signed-in name and role appear in the header, and `GET /auth/me` returns the profile.
 9. **Category management is API-only**, with no admin screen. A category's `isActive` flag is stored but does not hide its dishes. Deleting a category also deletes its dishes.
-10. **Production deployment** needs the frontend and `/api` served from one origin, because the client uses relative API paths and a `SameSite=Lax` cookie.
+10. **Standalone MongoDB** has no multi-document transactions. See Transactions above.
+11. **Production deployment** needs the frontend and `/api` served from one origin, because the client uses relative API paths and a `SameSite=Lax` cookie.
 
 ---
 

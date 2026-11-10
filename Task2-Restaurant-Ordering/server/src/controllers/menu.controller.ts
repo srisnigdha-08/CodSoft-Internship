@@ -1,8 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import prisma from '../prisma';
+import { MenuCategory, MenuItem, Order } from '../models';
 import { NotFoundError, BadRequestError } from '../utils/errors';
 import { sendCreated, sendSuccess } from '../utils/response';
+import { runAtomic } from '../db';
+import { containsInsensitive, idOrField, objectIdSchema } from '../utils/ids';
 
 // Validation Schemas
 const createCategorySchema = z.object({
@@ -16,7 +18,7 @@ const createCategorySchema = z.object({
 const updateCategorySchema = createCategorySchema.partial();
 
 const createMenuItemSchema = z.object({
-  categoryId: z.string().uuid('Invalid Category ID'),
+  categoryId: objectIdSchema('Invalid Category ID'),
   name: z.string().min(2, 'Name must be at least 2 characters'),
   slug: z.string().min(2, 'Slug is required'),
   description: z.string().min(5, 'Description must be at least 5 characters'),
@@ -33,19 +35,38 @@ const createMenuItemSchema = z.object({
 
 const updateMenuItemSchema = createMenuItemSchema.partial();
 
+async function assertCategoryExists(categoryId?: string) {
+  if (categoryId && !(await MenuCategory.exists({ _id: categoryId }))) {
+    throw new BadRequestError('A referenced record does not exist.');
+  }
+}
+
+/** Past orders keep their name and price snapshot and simply lose the link to the deleted dish. */
+async function deleteMenuItems(itemIds: unknown[], session?: Parameters<Parameters<typeof runAtomic>[0]>[0]) {
+  await Order.updateMany(
+    { 'items.menuItemId': { $in: itemIds } },
+    { $set: { 'items.$[line].menuItemId': null } },
+    { arrayFilters: [{ 'line.menuItemId': { $in: itemIds } }], session }
+  );
+  await MenuItem.deleteMany({ _id: { $in: itemIds } }, { session });
+}
+
 // Category Controllers
 export async function getCategories(req: Request, res: Response, next: NextFunction) {
   try {
-    const categories = await prisma.menuCategory.findMany({
-      orderBy: { sortOrder: 'asc' },
-      include: {
-        _count: {
-          select: { items: true },
-        },
-      },
-    });
+    const [categories, counts] = await Promise.all([
+      MenuCategory.find().sort({ sortOrder: 1 }),
+      MenuItem.aggregate<{ _id: unknown; items: number }>([{ $group: { _id: '$categoryId', items: { $sum: 1 } } }]),
+    ]);
 
-    return sendSuccess(res, { categories });
+    const itemCounts = new Map(counts.map((c) => [String(c._id), c.items]));
+
+    return sendSuccess(res, {
+      categories: categories.map((category) => ({
+        ...category.toJSON(),
+        _count: { items: itemCounts.get(category.id) || 0 },
+      })),
+    });
   } catch (err) {
     next(err);
   }
@@ -55,9 +76,7 @@ export async function createCategory(req: Request, res: Response, next: NextFunc
   try {
     const validated = createCategorySchema.parse(req.body);
 
-    const category = await prisma.menuCategory.create({
-      data: validated,
-    });
+    const category = await MenuCategory.create(validated);
 
     return sendCreated(res, { category }, 'Category created successfully');
   } catch (err) {
@@ -70,10 +89,10 @@ export async function updateCategory(req: Request, res: Response, next: NextFunc
     const { id } = req.params;
     const validated = updateCategorySchema.parse(req.body);
 
-    const category = await prisma.menuCategory.update({
-      where: { id },
-      data: validated,
-    });
+    const category = await MenuCategory.findByIdAndUpdate(id, validated, { new: true, runValidators: true });
+    if (!category) {
+      throw new NotFoundError('The requested record was not found.');
+    }
 
     return sendSuccess(res, { category }, 'Category updated successfully');
   } catch (err) {
@@ -84,8 +103,17 @@ export async function updateCategory(req: Request, res: Response, next: NextFunc
 export async function deleteCategory(req: Request, res: Response, next: NextFunction) {
   try {
     const { id } = req.params;
-    await prisma.menuCategory.delete({
-      where: { id },
+
+    const category = await MenuCategory.findById(id);
+    if (!category) {
+      throw new NotFoundError('The requested record was not found.');
+    }
+
+    // Deleting a category also deletes its dishes
+    const items = await MenuItem.find({ categoryId: category._id }).select('_id');
+    await runAtomic(async (session) => {
+      await deleteMenuItems(items.map((item) => item._id), session);
+      await MenuCategory.deleteOne({ _id: category._id }, { session });
     });
 
     return sendSuccess(res, null, 'Category deleted successfully');
@@ -99,20 +127,19 @@ export async function getMenuItems(req: Request, res: Response, next: NextFuncti
   try {
     const { category, search, vegetarian, available } = req.query;
 
-    const where: any = {};
+    const where: Record<string, unknown> = {};
 
     if (category) {
-      where.category = {
-        slug: String(category),
-      };
+      const matched = await MenuCategory.findOne({ slug: String(category) }).select('_id');
+      if (!matched) {
+        return sendSuccess(res, { items: [] });
+      }
+      where.categoryId = matched._id;
     }
 
     if (search) {
-      const term = String(search).trim();
-      where.OR = [
-        { name: { contains: term, mode: 'insensitive' } },
-        { description: { contains: term, mode: 'insensitive' } },
-      ];
+      const term = containsInsensitive(String(search).trim());
+      where.$or = [{ name: term }, { description: term }];
     }
 
     if (vegetarian !== undefined) {
@@ -123,19 +150,9 @@ export async function getMenuItems(req: Request, res: Response, next: NextFuncti
       where.isAvailable = available === 'true';
     }
 
-    const items = await prisma.menuItem.findMany({
-      where,
-      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
-      include: {
-        category: {
-          select: {
-            id: true,
-            name: true,
-            slug: true,
-          },
-        },
-      },
-    });
+    const items = await MenuItem.find(where)
+      .sort({ sortOrder: 1, name: 1 })
+      .populate({ path: 'category', select: 'name slug' });
 
     return sendSuccess(res, { items });
   } catch (err) {
@@ -147,14 +164,7 @@ export async function getMenuItemById(req: Request, res: Response, next: NextFun
   try {
     const { id } = req.params;
 
-    const item = await prisma.menuItem.findFirst({
-      where: {
-        OR: [{ id }, { slug: id }],
-      },
-      include: {
-        category: true,
-      },
-    });
+    const item = await MenuItem.findOne(idOrField(id, 'slug')).populate('category');
 
     if (!item) {
       throw new NotFoundError('Menu item not found');
@@ -169,13 +179,10 @@ export async function getMenuItemById(req: Request, res: Response, next: NextFun
 export async function createMenuItem(req: Request, res: Response, next: NextFunction) {
   try {
     const validated = createMenuItemSchema.parse(req.body);
+    await assertCategoryExists(validated.categoryId);
 
-    const item = await prisma.menuItem.create({
-      data: validated,
-      include: {
-        category: true,
-      },
-    });
+    const created = await MenuItem.create(validated);
+    const item = await created.populate('category');
 
     return sendCreated(res, { item }, 'Menu item created successfully');
   } catch (err) {
@@ -187,14 +194,12 @@ export async function updateMenuItem(req: Request, res: Response, next: NextFunc
   try {
     const { id } = req.params;
     const validated = updateMenuItemSchema.parse(req.body);
+    await assertCategoryExists(validated.categoryId);
 
-    const item = await prisma.menuItem.update({
-      where: { id },
-      data: validated,
-      include: {
-        category: true,
-      },
-    });
+    const item = await MenuItem.findByIdAndUpdate(id, validated, { new: true, runValidators: true }).populate('category');
+    if (!item) {
+      throw new NotFoundError('The requested record was not found.');
+    }
 
     return sendSuccess(res, { item }, 'Menu item updated successfully');
   } catch (err) {
@@ -206,9 +211,12 @@ export async function deleteMenuItem(req: Request, res: Response, next: NextFunc
   try {
     const { id } = req.params;
 
-    await prisma.menuItem.delete({
-      where: { id },
-    });
+    const item = await MenuItem.findById(id);
+    if (!item) {
+      throw new NotFoundError('The requested record was not found.');
+    }
+
+    await runAtomic((session) => deleteMenuItems([item._id], session));
 
     return sendSuccess(res, null, 'Menu item deleted successfully');
   } catch (err) {

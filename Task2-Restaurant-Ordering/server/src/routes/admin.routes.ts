@@ -7,7 +7,7 @@ import {
 } from '../controllers/admin.controller';
 import { authenticate } from '../middleware/auth';
 import { authorize } from '../middleware/role';
-import { Role } from '@prisma/client';
+import { Role } from '../models/enums';
 
 const router = Router();
 

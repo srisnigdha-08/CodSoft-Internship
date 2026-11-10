@@ -1,6 +1,7 @@
 import jwt from 'jsonwebtoken';
 import { config } from '../config';
-import { Role } from '@prisma/client';
+import { Role } from '../models/enums';
+import { isObjectIdString } from './ids';
 
 export interface TokenPayload {
   userId: string;
@@ -16,5 +17,10 @@ export function signToken(payload: TokenPayload): string {
 }
 
 export function verifyToken(token: string): TokenPayload {
-  return jwt.verify(token, config.jwtSecret) as TokenPayload;
+  const payload = jwt.verify(token, config.jwtSecret) as TokenPayload;
+  // Tokens issued before the MongoDB migration carry ids that no longer exist
+  if (!isObjectIdString(payload.userId)) {
+    throw new jwt.JsonWebTokenError('Malformed user id');
+  }
+  return payload;
 }

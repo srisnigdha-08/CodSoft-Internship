@@ -11,6 +11,14 @@ if (!jwtSecret) {
   );
 }
 
+const mongodbUri = process.env.MONGODB_URI;
+if (!mongodbUri) {
+  throw new Error(
+    'FATAL CONFIGURATION ERROR: MONGODB_URI environment variable is missing. ' +
+    'Please set MONGODB_URI in server/.env (see server/.env.example) or via your process environment.'
+  );
+}
+
 const cookieSecret = process.env.COOKIE_SECRET;
 if (!cookieSecret) {
   throw new Error(
@@ -32,6 +40,7 @@ export const config = {
   port: parseInt(process.env.PORT || '5050', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
   frontendOrigin: process.env.FRONTEND_ORIGIN || 'http://localhost:3000',
+  mongodbUri,
   jwtSecret,
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
   cookieSecret,

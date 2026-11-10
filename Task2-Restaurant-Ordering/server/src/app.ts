@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import { config } from './config';
+import { pingDatabase } from './db';
 import { errorHandler } from './middleware/error';
 import { ForbiddenError } from './utils/errors';
 
@@ -40,16 +41,21 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser(config.cookieSecret));
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.status(200).json({
-    status: 'healthy',
+// Health check endpoints: they verify the database connection and never reveal connection details
+async function healthCheck(req: express.Request, res: express.Response) {
+  const connected = await pingDatabase();
+  res.status(connected ? 200 : 503).json({
+    status: connected ? 'ok' : 'error',
+    database: connected ? 'connected' : 'disconnected',
     timestamp: new Date().toISOString(),
     service: 'DineDesk Restaurant API',
     version: '1.0.0',
     environment: config.nodeEnv,
   });
-});
+}
+
+app.get('/health', healthCheck);
+app.get('/api/health', healthCheck);
 
 // API Routes
 app.use('/api/v1/auth', authRoutes);

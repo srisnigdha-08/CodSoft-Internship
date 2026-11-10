@@ -9,7 +9,7 @@ import {
 } from '../controllers/reservations.controller';
 import { authenticate, optionalAuth } from '../middleware/auth';
 import { authorize } from '../middleware/role';
-import { Role } from '@prisma/client';
+import { Role } from '../models/enums';
 
 const router = Router();
 

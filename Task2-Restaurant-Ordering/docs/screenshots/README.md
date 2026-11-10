@@ -2,6 +2,8 @@
 
 Genuine screenshots of the running application, captured on 2026-11-10 at 1440px width from the Vite development server. They use a freshly seeded demo database and fictional data only.
 
+After the move to MongoDB, these screens were re-checked in the running app and still match, so they were not recaptured.
+
 The one-click demo sign-in controls visible in the header appear only in development builds. Payments shown are simulated.
 
 | File | Screen | How to reach it |

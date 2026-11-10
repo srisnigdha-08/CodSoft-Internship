@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
-import { ApiError } from '../utils/errors';
+import mongoose from 'mongoose';
 import { ZodError } from 'zod';
-import { Prisma } from '@prisma/client';
+import { ApiError } from '../utils/errors';
 
 export function errorHandler(
   err: any,
@@ -39,30 +39,29 @@ export function errorHandler(
     return res.status(413).json({ success: false, message: 'Request body is too large.' });
   }
 
-  if (err instanceof Prisma.PrismaClientKnownRequestError) {
-    if (err.code === 'P2002') {
-      // meta.target is an array of fields or an index name, depending on the constraint
-      const rawTarget = err.meta?.target;
-      const target = Array.isArray(rawTarget) ? rawTarget.join(', ') : 'value';
-      return res.status(409).json({
-        success: false,
-        message: `A record with this ${target} already exists.`,
-      });
-    }
+  // Unique index violation
+  if (err?.code === 11000) {
+    const fields = Object.keys(err.keyPattern ?? {}).join(', ') || 'value';
+    return res.status(409).json({
+      success: false,
+      message: `A record with this ${fields} already exists.`,
+    });
+  }
 
-    if (err.code === 'P2003') {
-      return res.status(400).json({
-        success: false,
-        message: 'A referenced record does not exist.',
-      });
-    }
+  if (err instanceof mongoose.Error.ValidationError) {
+    return res.status(400).json({
+      success: false,
+      message: 'Validation failed',
+      errors: Object.values(err.errors).map((e) => ({ field: e.path, message: e.message })),
+    });
+  }
 
-    if (err.code === 'P2025') {
-      return res.status(404).json({
-        success: false,
-        message: 'The requested record was not found.',
-      });
+  // A malformed id in the URL can never match a record
+  if (err instanceof mongoose.Error.CastError) {
+    if (err.path === '_id') {
+      return res.status(404).json({ success: false, message: 'The requested record was not found.' });
     }
+    return res.status(400).json({ success: false, message: `Invalid value for ${err.path}.` });
   }
 
   console.error('[Unhandled Error]', err);
