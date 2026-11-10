@@ -21,6 +21,7 @@ pnpm-debug.log*
 *.dump
 *.backup
 *.sql.gz
+*.zip
 
 # Existing Task 1 distribution archive (kept outside version control)
 Task1-Student-Management.zip
@@ -32,5 +33,6 @@ Task2-DineDesk/
 .idea/
 .DS_Store
 Thumbs.db
+.claude/
 # TypeScript incremental build metadata
 *.tsbuildinfo

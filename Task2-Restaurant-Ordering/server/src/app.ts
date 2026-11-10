@@ -3,6 +3,7 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import { config } from './config';
 import { errorHandler } from './middleware/error';
+import { ForbiddenError } from './utils/errors';
 
 // Routes
 import authRoutes from './routes/auth.routes';
@@ -17,17 +18,27 @@ import adminRoutes from './routes/admin.routes';
 
 export const app = express();
 
+// Secure CORS whitelist
+const allowedOrigins = new Set<string>([
+  config.frontendOrigin,
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+]);
+
 // Middlewares
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (like mobile apps, curl, or Postman)
-      if (!origin) return callback(null, true);
-      // Allow localhost on any port for local development
-      if (origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:')) {
+      // Allow non-browser requests with no origin (like mobile clients, curl, or Postman)
+      if (!origin) {
         return callback(null, true);
       }
-      return callback(null, true);
+      if (allowedOrigins.has(origin)) {
+        return callback(null, true);
+      }
+      return callback(new ForbiddenError(`Origin '${origin}' not allowed by CORS policy.`));
     },
     credentials: true,
   })

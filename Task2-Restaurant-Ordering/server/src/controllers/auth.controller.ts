@@ -119,7 +119,11 @@ export async function login(req: Request, res: Response, next: NextFunction) {
 }
 
 export async function logout(req: Request, res: Response) {
-  res.clearCookie('dinedesk_token');
+  res.clearCookie('dinedesk_token', {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+  });
   return sendSuccess(res, null, 'Logged out successfully');
 }
 

@@ -86,6 +86,9 @@ export async function createReservation(req: Request, res: Response, next: NextF
       let allocatedTableId = validated.tableId;
 
       if (allocatedTableId) {
+        // Acquire row-level lock on the table to serialize concurrent booking requests
+        await tx.$queryRaw`SELECT id FROM "restaurant_tables" WHERE id = ${allocatedTableId} FOR UPDATE`;
+
         // Verify requested table exists and meets capacity
         const table = await tx.restaurantTable.findUnique({
           where: { id: allocatedTableId },
@@ -122,8 +125,17 @@ export async function createReservation(req: Request, res: Response, next: NextF
           orderBy: { capacity: 'asc' },
         });
 
+        if (eligibleTables.length === 0) {
+          throw new ConflictError('No tables with sufficient capacity are available for this party size.');
+        }
+
+        // Acquire row-level lock on candidate tables to serialize concurrent allocations
+        const candidateIds = eligibleTables.map((t) => t.id);
+        await tx.$queryRaw`SELECT id FROM "restaurant_tables" WHERE id = ANY(${candidateIds}) FOR UPDATE`;
+
         const booked = await tx.reservation.findMany({
           where: {
+            tableId: { in: candidateIds },
             reservationDate: validated.reservationDate,
             reservationTime: validated.reservationTime,
             status: { in: [ReservationStatus.PENDING, ReservationStatus.CONFIRMED] },
@@ -179,6 +191,7 @@ export async function getMyReservations(req: Request, res: Response, next: NextF
       where.OR = [{ customerId }, { customerEmail: req.user?.email }];
     } else if (email) {
       where.customerEmail = email.toLowerCase();
+      where.customerId = null; // Prevent enumeration of registered users' reservations
     } else {
       throw new BadRequestError('Authentication or email is required to view your reservations.');
     }

@@ -7,11 +7,12 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
+node_modules/
+dist/
+dist-ssr/
 *.local
-coverage
+coverage/
+*.tsbuildinfo
 .env
 .env.*
 !.env.example
@@ -23,8 +24,8 @@ coverage
 server/.env
 server/.env.*
 !server/.env.example
-server/coverage
-server/dist
+server/coverage/
+server/dist/
 
 # Editor directories and files
 .vscode/*

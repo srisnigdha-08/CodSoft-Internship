@@ -419,4 +419,4 @@ CODSOFT_TASKSNO/
 └── README.md
 ```
 
-Keep the Git root at the parent repository; do not initialize a separate repository inside this task directory. Before creating a commit, review the staged files from the parent root and confirm `.env` files and generated outputs remain excluded. Never force-push or overwrite an existing remote repository. `.env` files, `node_modules`, build output, database dumps, and test coverage are ignored; `server/.env.example` contains placeholders only.
+Keep the Git root at the parent repository; do not initialize a separate repository inside this task directory. Before creating a commit, review the staged files from the parent root and confirm `.env` files and generated outputs remain excluded. Never force-push or overwrite an existing remote repository. `.env` files, `node_modules`, build output, database dumps, and test coverage are ignored; `.env.example` and `server/.env.example` contain safe placeholders only.

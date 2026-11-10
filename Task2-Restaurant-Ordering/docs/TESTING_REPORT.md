@@ -4,17 +4,19 @@
 
 - **Testing Framework:** Vitest (v2.1.9) + Supertest (v7.0.0) + React Testing Setup
 - **Target Database:** Live PostgreSQL 16.4 (`dinedesk_db`) on `localhost:5432`
-- **Total Tests Executed:** 21
-- **Passed:** 21 (100%)
+- **Total Tests Executed:** 26
+- **Passed:** 26 (100%)
 - **Failed:** 0
-- **Duration:** 8.73s (execution) / 80.46s (total)
+- **Duration:** ~5.6s (execution)
 
 ---
 
 ## 2. Test Suites & Verifications
 
-### 2.1 Server Health & Environment
+### 2.1 Server Health & CORS Security
 - `GET /health` -> Verified HTTP 200 with service metadata and environment status.
+- CORS Allowed Origin -> Verified HTTP 200 and headers `Access-Control-Allow-Origin: http://localhost:3000` + `Access-Control-Allow-Credentials: true`.
+- CORS Unauthorized Origin -> Verified HTTP 403 Forbidden rejection when request originates from untrusted domain (`http://malicious-attacker-site.com`).
 
 ### 2.2 Authentication & Role-Based Authorization
 - `POST /api/v1/auth/register` -> Verified customer registration, password bcrypt hashing, token generation, and duplicate email prevention.
@@ -31,6 +33,7 @@
 - `POST /api/v1/orders` -> Verified that line items, subtotals, 5% GST, and delivery fees are computed by the server rather than trusting frontend submitted values.
 - Delivery Address Validation -> Verified that delivery orders without street addresses are rejected with HTTP 400.
 - Customer Ownership Check -> Verified that customer accounts can only view their own orders (`/api/v1/orders/:id`).
+- Private Order Protection -> Verified that unauthenticated requests to view account orders receive HTTP 401, and other customers receive HTTP 403 Forbidden.
 
 ### 2.5 Kitchen Operations & State Machine
 - `GET /api/v1/kitchen/orders` -> Verified kitchen queue retrieval for staff.
@@ -41,6 +44,7 @@
 - `GET /api/v1/reservations/availability` -> Verified real-time table availability check.
 - `POST /api/v1/reservations` -> Successfully created and allocated reservation in PostgreSQL.
 - Double-Booking Prevention -> Re-submitted identical reservation for the same table and time slot, confirming database conflict rejection with HTTP 409 Conflict.
+- Concurrency Serialization -> Dispatched simultaneous concurrent requests for the identical table and slot using `Promise.all()`, confirming that PostgreSQL row locks (`SELECT ... FOR UPDATE`) safely serialize the transaction, allowing exactly 1 confirmation (201) and 1 conflict rejection (409).
 
 ### 2.7 Payment Abstraction & Failure Path Simulation
 - `POST /api/v1/payments/checkout` with `simulateFailure: true` -> Verified simulation failure path returning HTTP 402 Payment Required and marking payment as `FAILED`.

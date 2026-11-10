@@ -1,0 +1,286 @@
+// MongoDB has no SQL migrations, foreign keys or CHECK constraints:
+// - `npm run db:setup` pushes this schema's indexes and applies prisma/validators.ts.
+// - Relations and their onDelete rules are enforced by Prisma Client, not by the server.
+// - The server must be a replica set because Prisma uses multi-document transactions.
+// IDs are UUID strings stored in `_id`, which keeps the API's identifier format.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  JOB_SEEKER
+  EMPLOYER
+  ADMIN
+}
+
+enum JobType {
+  FULL_TIME
+  PART_TIME
+  CONTRACT
+  INTERNSHIP
+  FREELANCE
+}
+
+enum WorkMode {
+  ONSITE
+  REMOTE
+  HYBRID
+}
+
+enum ExperienceLevel {
+  ENTRY
+  MID
+  SENIOR
+  LEAD
+}
+
+enum JobStatus {
+  DRAFT
+  ACTIVE
+  CLOSED
+  EXPIRED
+}
+
+enum ApplicationStatus {
+  APPLIED
+  UNDER_REVIEW
+  SHORTLISTED
+  INTERVIEW
+  REJECTED
+  HIRED
+  WITHDRAWN
+}
+
+model User {
+  id           String   @id @default(uuid()) @map("_id")
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         Role
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  jobSeekerProfile JobSeekerProfile?
+  employerProfile  EmployerProfile?
+  statusChanges    ApplicationStatusHistory[]
+
+  @@index([role, isActive])
+  @@index([createdAt])
+}
+
+model JobSeekerProfile {
+  id              String   @id @default(uuid()) @map("_id")
+  userId          String   @unique
+  phone           String?
+  location        String?
+  headline        String?
+  summary         String?
+  // Not @unique: a MongoDB unique index would allow only one profile without a resume.
+  currentResumeId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  currentResume Resume?          @relation("CurrentResume", fields: [currentResumeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  resumes       Resume[]         @relation("ProfileResumes")
+  skills        JobSeekerSkill[]
+  education     Education[]
+  experience    Experience[]
+  applications  Application[]
+
+  @@index([currentResumeId])
+}
+
+model EmployerProfile {
+  id        String   @id @default(uuid()) @map("_id")
+  userId    String   @unique
+  phone     String?
+  position  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company?
+}
+
+model Company {
+  id                String   @id @default(uuid()) @map("_id")
+  employerProfileId String   @unique
+  name              String
+  website           String?
+  industry          String?
+  size              String?
+  location          String?
+  description       String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  employerProfile EmployerProfile @relation(fields: [employerProfileId], references: [id], onDelete: Cascade)
+  jobs            Job[]
+
+  @@index([name])
+}
+
+model Skill {
+  id             String   @id @default(uuid()) @map("_id")
+  name           String
+  normalizedName String   @unique
+  createdAt      DateTime @default(now())
+
+  jobs       JobSkill[]
+  jobSeekers JobSeekerSkill[]
+
+  @@index([name])
+}
+
+model JobSeekerSkill {
+  id        String @id @default(uuid()) @map("_id")
+  profileId String
+  skillId   String
+
+  profile JobSeekerProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  skill   Skill            @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@unique([profileId, skillId])
+  @@index([skillId])
+}
+
+model Job {
+  id               String          @id @default(uuid()) @map("_id")
+  companyId        String
+  title            String
+  description      String
+  requirements     String
+  responsibilities String
+  location         String
+  jobType          JobType
+  workMode         WorkMode
+  experienceLevel  ExperienceLevel
+  salaryMin        Int?
+  salaryMax        Int?
+  status           JobStatus       @default(DRAFT)
+  publishedAt      DateTime?
+  expiresAt        DateTime?
+  moderatedAt      DateTime?
+  moderationReason String?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  company      Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  skills       JobSkill[]
+  applications Application[]
+
+  @@index([status, publishedAt])
+  @@index([companyId, status])
+  @@index([jobType])
+  @@index([workMode])
+  @@index([experienceLevel])
+  @@index([location])
+  @@index([expiresAt])
+}
+
+model JobSkill {
+  id      String @id @default(uuid()) @map("_id")
+  jobId   String
+  skillId String
+
+  job   Job   @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  skill Skill @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, skillId])
+  @@index([skillId])
+}
+
+model Education {
+  id           String    @id @default(uuid()) @map("_id")
+  profileId    String
+  institution  String
+  degree       String
+  fieldOfStudy String
+  startDate    DateTime
+  endDate      DateTime?
+  grade        String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  profile JobSeekerProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([profileId])
+}
+
+model Experience {
+  id               String    @id @default(uuid()) @map("_id")
+  profileId        String
+  company          String
+  jobTitle         String
+  description      String?
+  startDate        DateTime
+  endDate          DateTime?
+  currentlyWorking Boolean   @default(false)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  profile JobSeekerProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([profileId])
+}
+
+model Resume {
+  id           String   @id @default(uuid()) @map("_id")
+  profileId    String
+  originalName String
+  storedName   String   @unique
+  mimeType     String
+  sizeBytes    Int
+  createdAt    DateTime @default(now())
+
+  profile      JobSeekerProfile   @relation("ProfileResumes", fields: [profileId], references: [id], onDelete: Cascade)
+  currentFor   JobSeekerProfile[] @relation("CurrentResume")
+  applications Application[]
+
+  @@index([profileId])
+}
+
+model Application {
+  id          String            @id @default(uuid()) @map("_id")
+  jobId       String
+  candidateId String
+  resumeId    String?
+  coverLetter String?
+  status      ApplicationStatus @default(APPLIED)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  job       Job                        @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  candidate JobSeekerProfile           @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  resume    Resume?                    @relation(fields: [resumeId], references: [id], onDelete: SetNull)
+  history   ApplicationStatusHistory[]
+
+  @@unique([jobId, candidateId])
+  @@index([candidateId, status])
+  @@index([jobId, status])
+  @@index([resumeId])
+  @@index([createdAt])
+}
+
+model ApplicationStatusHistory {
+  id             String             @id @default(uuid()) @map("_id")
+  applicationId  String
+  previousStatus ApplicationStatus?
+  newStatus      ApplicationStatus
+  changedById    String
+  timestamp      DateTime           @default(now())
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  changedBy   User        @relation(fields: [changedById], references: [id], onDelete: Restrict)
+
+  @@index([applicationId, timestamp])
+  @@index([changedById])
+}

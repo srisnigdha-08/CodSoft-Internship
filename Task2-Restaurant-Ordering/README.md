@@ -26,7 +26,7 @@ A complete, production-grade restaurant ordering and table management platform b
 - **Interactive Digital Menu:** Real-time database-backed catalog with category tabs (Starters, Main Course, Desserts, Beverages), instant text search, pure vegetarian filter, and item details.
 - **Server-Side Price Recalculation:** Client-submitted subtotals and totals are never trusted; line items, 5% GST, and delivery fees are recalculated directly from PostgreSQL menu prices on the server.
 - **Dining Modes:** Dine-In with table selection, Takeaway / Counter Pickup, and Doorstep Delivery with address validation.
-- **Live Order Tracker:** Step-by-step progress timeline (`PENDING` -> `CONFIRMED` -> `PREPARING` -> `READY` -> `COMPLETED`) with auto-polling every 4 seconds to reflect live updates from the kitchen.
+- **Near-Real-Time Order Tracking:** Step-by-step progress timeline (`PENDING` -> `CONFIRMED` -> `PREPARING` -> `READY` -> `COMPLETED`) using 4-second reactive polling to reflect status updates directly from the kitchen without WebSockets.
 - **Customer Cancellation:** Orders can be cancelled by the customer if still in `PENDING` or `CONFIRMED` state before active kitchen preparation begins.
 
 ### 2. Real-Time Table Reservations
@@ -97,7 +97,7 @@ Task2-Restaurant-Ordering/
 │   │   ├── config.ts           # Typed environment configuration
 │   │   └── server.ts           # Server bootstrap
 │   ├── tests/
-│   │   └── api.test.ts         # 21 automated integration tests
+│   │   └── api.test.ts         # 26 automated integration tests
 │   ├── package.json
 │   ├── tsconfig.json
 │   └── .env.example
@@ -106,7 +106,7 @@ Task2-Restaurant-Ordering/
 │   ├── ARCHITECTURE.md         # Full architecture design & workflows
 │   ├── API_SPECIFICATION.md    # REST endpoints documentation
 │   ├── DATABASE_SCHEMA.md      # Data dictionary & ER diagram
-│   ├── TESTING_REPORT.md       # 100% test pass verification (21/21)
+│   ├── TESTING_REPORT.md       # 100% test pass verification (26/26)
 │   ├── DEMO_VIDEO_OUTLINE.md   # Step-by-step video presentation script
 │   ├── LEARNING_GUIDE.md       # Full engineering guide & technical decisions
 │   └── screenshots/            # Submission screenshot checklist
@@ -170,10 +170,10 @@ Edit `server/.env` if your local PostgreSQL credentials differ from the defaults
 PORT=5050
 NODE_ENV=development
 FRONTEND_ORIGIN=http://localhost:3000
-DATABASE_URL=postgresql://postgres@localhost:5432/dinedesk_db?schema=public
-JWT_SECRET=dinedesk_jwt_super_secure_secret_key_2026_codsoft_task2
+DATABASE_URL=postgresql://postgres:password@localhost:5432/dinedesk_db?schema=public
+JWT_SECRET=replace_with_a_random_secret
 JWT_EXPIRES_IN=7d
-COOKIE_SECRET=dinedesk_cookie_secret_key_2026
+COOKIE_SECRET=replace_with_a_random_cookie_secret
 ```
 
 ### Step 3: Install Dependencies
@@ -191,7 +191,7 @@ npm run db:seed
 ```powershell
 npm run test
 ```
-All 21 backend integration tests will run against the database and report results.
+All 26 backend integration tests will run against the database and report results.
 
 ### Step 6: Start Application
 Run the backend and frontend development servers:

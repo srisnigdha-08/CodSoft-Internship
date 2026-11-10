@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import prisma from '../prisma';
 import { OrderStatus, OrderType, PaymentMethod, PaymentStatus, Role } from '@prisma/client';
-import { BadRequestError, NotFoundError, ForbiddenError } from '../utils/errors';
+import { BadRequestError, NotFoundError, ForbiddenError, UnauthorizedError } from '../utils/errors';
 import { sendCreated, sendSuccess } from '../utils/response';
 
 const createOrderSchema = z.object({
@@ -174,6 +174,7 @@ export async function getMyOrders(req: Request, res: Response, next: NextFunctio
       where.OR = [{ customerId }, { customerEmail: req.user?.email }];
     } else if (email) {
       where.customerEmail = email.toLowerCase();
+      where.customerId = null; // Prevent enumeration of registered users' account orders
     } else {
       throw new BadRequestError('Authentication or email is required to view your orders.');
     }
@@ -229,11 +230,12 @@ export async function getOrderById(req: Request, res: Response, next: NextFuncti
     }
 
     // Role-based ownership check
-    if (req.user) {
-      if (req.user.role === Role.CUSTOMER) {
-        if (order.customerId && order.customerId !== req.user.userId && order.customerEmail !== req.user.email) {
-          throw new ForbiddenError('You do not have permission to view this order.');
-        }
+    if (order.customerId) {
+      if (!req.user) {
+        throw new UnauthorizedError('Authentication is required to view this account order.');
+      }
+      if (req.user.role === Role.CUSTOMER && order.customerId !== req.user.userId && order.customerEmail !== req.user.email) {
+        throw new ForbiddenError('You do not have permission to view this order.');
       }
     }
 
@@ -263,8 +265,11 @@ export async function cancelOrder(req: Request, res: Response, next: NextFunctio
     }
 
     // Ownership check for customers
-    if (req.user && req.user.role === Role.CUSTOMER) {
-      if (order.customerId && order.customerId !== req.user.userId && order.customerEmail !== req.user.email) {
+    if (order.customerId) {
+      if (!req.user) {
+        throw new UnauthorizedError('Authentication is required to cancel this account order.');
+      }
+      if (req.user.role === Role.CUSTOMER && order.customerId !== req.user.userId && order.customerEmail !== req.user.email) {
         throw new ForbiddenError('You can only cancel your own orders.');
       }
     }

@@ -36,13 +36,45 @@ describe('DineDesk Full Backend Test Suite', () => {
 
     const table = await prisma.restaurantTable.findFirst();
     testTableId = table!.id;
+
+    // Clean up any previous test reservations to ensure test idempotency
+    await prisma.reservation.deleteMany({
+      where: {
+        OR: [
+          { customerEmail: { in: ['aarav@example.com', 'diff@example.com', 'concurrent1@example.com', 'concurrent2@example.com'] } },
+          { reservationDate: { in: ['2026-11-20', '2026-11-21', '2026-11-22'] } },
+        ],
+      },
+    });
   });
 
-  // 1. Health check
-  it('GET /health - returns healthy status', async () => {
-    const res = await request(app).get('/health');
-    expect(res.status).toBe(200);
-    expect(res.body.status).toBe('healthy');
+  // 1. Health check & CORS Security
+  describe('Health check & CORS Security', () => {
+    it('GET /health - returns healthy status', async () => {
+      const res = await request(app).get('/health');
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe('healthy');
+    });
+
+    it('CORS - allows requests from configured valid frontend origin', async () => {
+      const res = await request(app)
+        .get('/health')
+        .set('Origin', 'http://localhost:3000');
+
+      expect(res.status).toBe(200);
+      expect(res.headers['access-control-allow-origin']).toBe('http://localhost:3000');
+      expect(res.headers['access-control-allow-credentials']).toBe('true');
+    });
+
+    it('CORS - rejects requests from unauthorized external origin', async () => {
+      const res = await request(app)
+        .get('/health')
+        .set('Origin', 'http://malicious-attacker-site.com');
+
+      expect(res.status).toBe(403);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toMatch(/not allowed by CORS policy/i);
+    });
   });
 
   // 2. Auth tests
@@ -170,6 +202,34 @@ describe('DineDesk Full Backend Test Suite', () => {
       expect(res.status).toBe(200);
       expect(res.body.data.order.id).toBe(createdOrderId);
     });
+
+    it('GET /api/v1/orders/:id - rejects unauthenticated access to private account order', async () => {
+      const res = await request(app)
+        .get(`/api/v1/orders/${createdOrderId}`);
+
+      expect(res.status).toBe(401);
+      expect(res.body.success).toBe(false);
+    });
+
+    it('GET /api/v1/orders/:id - rejects unauthorized customer from viewing another customer private order', async () => {
+      // Register a second customer
+      const otherUserEmail = `other_customer_${Date.now()}@example.com`;
+      const regRes = await request(app)
+        .post('/api/v1/auth/register')
+        .send({
+          name: 'Other Customer',
+          email: otherUserEmail,
+          password: 'Password@123',
+        });
+      const otherToken = regRes.body.data.token;
+
+      const res = await request(app)
+        .get(`/api/v1/orders/${createdOrderId}`)
+        .set('Authorization', `Bearer ${otherToken}`);
+
+      expect(res.status).toBe(403);
+      expect(res.body.success).toBe(false);
+    });
   });
 
   // 5. Kitchen Workflow & Status Transitions
@@ -260,6 +320,39 @@ describe('DineDesk Full Backend Test Suite', () => {
 
       expect(res.status).toBe(409);
       expect(res.body.message).toMatch(/already reserved/i);
+    });
+
+    it('POST /api/v1/reservations - concurrency test: simultaneous requests serialize and prevent double booking', async () => {
+      const concurrentDate = '2026-11-22';
+      const concurrentTime = '19:00';
+
+      const [res1, res2] = await Promise.all([
+        request(app)
+          .post('/api/v1/reservations')
+          .send({
+            customerName: 'Concurrent User 1',
+            customerEmail: 'concurrent1@example.com',
+            customerPhone: '+91 91111 22222',
+            guestCount: 2,
+            reservationDate: concurrentDate,
+            reservationTime: concurrentTime,
+            tableId: testTableId,
+          }),
+        request(app)
+          .post('/api/v1/reservations')
+          .send({
+            customerName: 'Concurrent User 2',
+            customerEmail: 'concurrent2@example.com',
+            customerPhone: '+91 93333 44444',
+            guestCount: 2,
+            reservationDate: concurrentDate,
+            reservationTime: concurrentTime,
+            tableId: testTableId,
+          }),
+      ]);
+
+      const statuses = [res1.status, res2.status].sort();
+      expect(statuses).toEqual([201, 409]);
     });
   });
 

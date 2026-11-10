@@ -1,8 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import prisma from '../prisma';
-import { PaymentMethod, PaymentStatus, OrderStatus } from '@prisma/client';
-import { BadRequestError, NotFoundError } from '../utils/errors';
+import { PaymentMethod, PaymentStatus, OrderStatus, Role } from '@prisma/client';
+import { BadRequestError, NotFoundError, ForbiddenError, UnauthorizedError } from '../utils/errors';
 import { sendSuccess } from '../utils/response';
 
 const checkoutPaymentSchema = z.object({
@@ -150,6 +150,7 @@ export async function getPaymentById(req: Request, res: Response, next: NextFunc
             customerEmail: true,
             totalAmount: true,
             status: true,
+            customerId: true,
           },
         },
       },
@@ -157,6 +158,16 @@ export async function getPaymentById(req: Request, res: Response, next: NextFunc
 
     if (!payment) {
       throw new NotFoundError('Payment record not found');
+    }
+
+    // Role-based ownership check for payments attached to customer accounts
+    if (payment.order?.customerId) {
+      if (!req.user) {
+        throw new UnauthorizedError('Authentication is required to view this payment record.');
+      }
+      if (req.user.role === Role.CUSTOMER && payment.order.customerId !== req.user.userId && payment.order.customerEmail !== req.user.email) {
+        throw new ForbiddenError('You do not have permission to view this payment record.');
+      }
     }
 
     return sendSuccess(res, { payment });

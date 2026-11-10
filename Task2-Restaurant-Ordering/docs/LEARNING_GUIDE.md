@@ -201,12 +201,13 @@ To satisfy the CodSoft requirement for payment support without demanding live me
 
 ## 7. Automated Testing Strategy
 
-DineDesk includes a comprehensive test suite using **Vitest** and **Supertest** (`server/tests/api.test.ts`) validating 21 integration scenarios:
+DineDesk includes a comprehensive test suite using **Vitest** and **Supertest** (`server/tests/api.test.ts`) validating 26 integration scenarios:
+- **Server Health & CORS Security:** Valid configured origin allowed with credentials, unauthorized origins rejected with HTTP 403.
 - **Authentication:** Registration, login with valid credentials, rejection of bad passwords, token verification.
 - **Menu System:** Category listing, dish retrieval, availability flags, vegetarian filtering.
-- **Order Pipeline:** Server-side price recalculation, order creation, transaction persistence, invalid status rejection.
+- **Order Pipeline:** Server-side price recalculation, order creation, transaction persistence, invalid status rejection, private order authorization (HTTP 401/403).
 - **Kitchen Workflow:** KDS queue retrieval, state machine status advancement (`CONFIRMED` → `PREPARING` → `READY`).
-- **Reservations:** Table availability queries, party size limits, double-booking rejection.
+- **Reservations & Concurrency:** Table availability queries, party size limits, double-booking rejection, and concurrent serialization with row-level locks.
 - **Payments:** Mock payment authorization and simulated decline handling.
 - **Admin Metrics:** Revenue calculations and catalog manipulation permissions.
 
@@ -248,7 +249,7 @@ Task2-Restaurant-Ordering/
 │   │   ├── utils/              # JWT token issuer, AppError class, response helpers
 │   │   ├── app.ts              # Express application configuration
 │   │   └── server.ts           # Server port listener (5050)
-│   └── tests/api.test.ts       # 21 automated integration tests
+│   └── tests/api.test.ts       # 26 automated integration tests
 │
 └── docs/                       # Comprehensive Engineering Documentation
     ├── ARCHITECTURE.md         # Detailed architectural blueprint
